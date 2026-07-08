@@ -30,35 +30,41 @@ app.get('/test-db', async (req, res) => {
 
 app.post('/chat', async (req, res) => {
     const { message } = req.body;
+
     if (!message) {
         return res.status(400).json({ error: '消息不能为空' });
     }
 
     try {
-        const response = await fetch('https://xn--vduyey89e.com/v1', {
+        const response = await fetch('https://xn--vduyey89e.com/v1/chat/completions', {
             method: 'POST',
             headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${process.env.CLAUDE_API_KEY}`
+                'Authorization': `Bearer ${process.env.CLAUDE_API_KEY}`,
+                'Content-Type': 'application/json'
             },
             body: JSON.stringify({
                 model: 'claude-opus-4-6',
-                max_tokens: 1024,
-                messages: [{ role: 'user', content: message }]
+                messages: [
+                    { role: 'system', content: '你是一个友好的AI助手。' },
+                    { role: 'user', content: message }
+                ],
+                max_tokens: 1024
             })
         });
 
+        const data = await response.json();
+
         if (!response.ok) {
-            const errorText = await response.text();
-            throw new Error(`API 错误: ${response.status} ${errorText}`);
+            console.error('中转站API错误:', data);
+            return res.status(response.status).json({ error: data.error?.message || '调用AI失败' });
         }
 
-        const data = await response.json();
-        const reply = data.choices[0].message.content;
+        const reply = data.choices?.[0]?.message?.content || '无回复';
         res.json({ reply });
+
     } catch (error) {
-        console.error('API 错误:', error.message);
-        res.status(500).json({ error: 'AI 服务暂时不可用' });
+        console.error('请求失败:', error);
+        res.status(500).json({ error: '服务器内部错误' });
     }
 });
 
