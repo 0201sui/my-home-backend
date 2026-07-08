@@ -1,47 +1,76 @@
-app.post('/chat', async (req, res) => {
-    const { message } = req.body;
+import { useState } from 'react';
+import './App.css';
 
-    if (!message) {
-        return res.status(400).json({ error: '消息不能为空' });
-    }
+function App() {
+    const [message, setMessage] = useState('');
+    const [response, setResponse] = useState('');
+    const [loading, setLoading] = useState(false);
 
-    try {
-        const response = await fetch('https://xn--vduyey89e.com/v1/chat/completions', {
-            method: 'POST',
-            headers: {
-                'Authorization': `Bearer ${process.env.CLAUDE_API_KEY}`,
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-                model: '[特特价次kiro]claude-opus-4-6',
-                messages: [
-                    { role: 'user', content: message }
-                ],
-                stream: true,  // ← 关键！开启流式
-                max_tokens: 1024
-            })
-        });
+    const sendMessage = async () => {
+        if (!message.trim()) return;
+        setLoading(true);
+        setResponse('');
 
-        // 设置 SSE 响应头
-        res.setHeader('Content-Type', 'text/event-stream');
-        res.setHeader('Cache-Control', 'no-cache');
-        res.setHeader('Connection', 'keep-alive');
+        try {
+            const res = await fetch('https://my-home-backend-9j56.onrender.com/chat', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ message }),
+            });
 
-        // 把中转站的流式数据直接转发给前端
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
+            const reader = res.body.getReader();
+            const decoder = new TextDecoder();
+            let fullText = '';
 
-        while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            const chunk = decoder.decode(value);
-            res.write(chunk);
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                const chunk = decoder.decode(value);
+                const lines = chunk.split('\\\\n');
+                for (const line of lines) {
+                    if (line.startsWith('data: ')) {
+                        const jsonStr = line.replace('data: ', '');
+                        if (jsonStr === '[DONE]') continue;
+                        try {
+                            const json = JSON.parse(jsonStr);
+                            const content = json.choices?.[0]?.delta?.content || '';
+                            fullText += content;
+                            setResponse(fullText);
+                        } catch (e) {}
+                    }
+                }
+            }
+
+            if (!fullText) {
+                setResponse('无回复');
+            }
+
+        } catch (error) {
+            setResponse('? 请求失败');
         }
+        setLoading(false);
+    };
 
-        res.end();
+    return (
+        <div className="app">
+            <h1>?? 鱼说</h1>
+            <div className="chat-box">
+                <textarea
+                    value={message}
+                    onChange={(e) => setMessage(e.target.value)}
+                    placeholder="输入消息..."
+                    rows={3}
+                />
+                <button onClick={sendMessage} disabled={loading}>
+                    {loading ? '发送中...' : '发送'}
+                </button>
+                <div className="response-box">
+                    <strong>回复：</strong>
+                    <p>{response || '等待回复...'}</p>
+                </div>
+            </div>
+        </div>
+    );
+}
 
-    } catch (error) {
-        console.error('请求失败:', error);
-        res.status(500).json({ error: '服务器内部错误' });
-    }
-});
+export default App;
