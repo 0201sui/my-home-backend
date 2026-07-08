@@ -43,7 +43,7 @@ app.post('/chat', async (req, res) => {
                 'Content-Type': 'application/json'
             },
             body: JSON.stringify({
-                model: 'claude-opus-4-6',
+               model: 'claude-3-5-sonnet-20241022',
                 messages: [
                     { role: 'system', content: '你是一个友好的AI助手。' },
                     { role: 'user', content: message }
