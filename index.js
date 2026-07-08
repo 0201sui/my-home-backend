@@ -14,10 +14,12 @@ const supabase = createClient(
     process.env.SUPABASE_KEY
 );
 
+// 健康检查
 app.get('/health', (req, res) => {
     res.json({ status: 'ok', message: '后端服务正常运行！' });
 });
 
+// 数据库测试
 app.get('/test-db', async (req, res) => {
     try {
         const { data, error } = await supabase.from('sessions').select('*').limit(1);
@@ -28,6 +30,7 @@ app.get('/test-db', async (req, res) => {
     }
 });
 
+// ===== 核心对话接口（普通 JSON 模式，不用流式） =====
 app.post('/chat', async (req, res) => {
     const { message } = req.body;
 
@@ -47,26 +50,20 @@ app.post('/chat', async (req, res) => {
                 messages: [
                     { role: 'user', content: message }
                 ],
-                stream: true,
+                stream: false,
                 max_tokens: 1024
             })
         });
 
-        res.setHeader('Content-Type', 'text/event-stream');
-        res.setHeader('Cache-Control', 'no-cache');
-        res.setHeader('Connection', 'keep-alive');
+        const data = await response.json();
 
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
-
-        while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            const chunk = decoder.decode(value);
-            res.write(chunk);
+        if (!response.ok) {
+            console.error('中转站API错误:', data);
+            return res.status(response.status).json({ error: data.error?.message || '调用AI失败' });
         }
 
-        res.end();
+        const reply = data.choices?.[0]?.message?.content || '无回复';
+        res.json({ reply });
 
     } catch (error) {
         console.error('请求失败:', error);
@@ -74,6 +71,7 @@ app.post('/chat', async (req, res) => {
     }
 });
 
+// 启动服务
 app.listen(port, () => {
     console.log(`后端服务已启动: http://localhost:${port}`);
     console.log(`健康检查: http://localhost:${port}/health`);
