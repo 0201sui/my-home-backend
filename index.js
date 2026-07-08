@@ -14,31 +14,6 @@ const supabase = createClient(
     process.env.SUPABASE_KEY
 );
 
-async function callDeepSeek(message) {
-    const response = await fetch('https://api.deepseek.com/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${process.env.DEEPSEEK_API_KEY}`
-        },
-        body: JSON.stringify({
-            model: 'deepseek-chat',
-            messages: [
-                { role: 'system', content: '你是一个友好的AI助手。' },
-                { role: 'user', content: message }
-            ]
-        })
-    });
-
-    if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`DeepSeek API 错误: ${response.status} ${errorText}`);
-    }
-
-    const data = await response.json();
-    return data.choices[0].message.content;
-}
-
 app.get('/health', (req, res) => {
     res.json({ status: 'ok', message: '后端服务正常运行！' });
 });
@@ -60,10 +35,29 @@ app.post('/chat', async (req, res) => {
     }
 
     try {
-        const reply = await callDeepSeek(message);
+        const response = await fetch('https://xn--vduyey89e.com/v1/chat/completions', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': 'Bearer sk-7uNLb1PGIdrBICkbm2ZB7zXcFhYOkdLquiqoCPVViIJgbSTW'
+            },
+            body: JSON.stringify({
+                model: 'claude-3-sonnet-20240229',
+                max_tokens: 1024,
+                messages: [{ role: 'user', content: message }]
+            })
+        });
+
+        if (!response.ok) {
+            const errorText = await response.text();
+            throw new Error(`API 错误: ${response.status} ${errorText}`);
+        }
+
+        const data = await response.json();
+        const reply = data.choices[0].message.content;
         res.json({ reply });
     } catch (error) {
-        console.error('DeepSeek API 错误:', error.message);
+        console.error('API 错误:', error.message);
         res.status(500).json({ error: 'AI 服务暂时不可用' });
     }
 });
