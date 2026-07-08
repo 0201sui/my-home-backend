@@ -35,7 +35,7 @@ app.post('/chat', async (req, res) => {
     }
 
     try {
-        const response = await fetch('https://xn--vduyey89e.com/v1/chat/completions', {
+        const response = await fetch('https://xn--vduyey89e.com/v1', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
