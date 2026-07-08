@@ -39,7 +39,7 @@ app.post('/chat', async (req, res) => {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
-                'Authorization': 'Bearer sk-7uNLb1PGIdrBICkbm2ZB7zXcFhYOkdLquiqoCPVViIJgbSTW'
+                'Authorization': `Bearer ${process.env.CLAUDE_API_KEY}`
             },
             body: JSON.stringify({
                 model: 'claude-3-sonnet-20240229',
