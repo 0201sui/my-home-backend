@@ -1,76 +1,81 @@
-import { useState } from 'react';
-import './App.css';
+require('dotenv').config();
+const express = require('express');
+const cors = require('cors');
+const { createClient } = require('@supabase/supabase-js');
 
-function App() {
-    const [message, setMessage] = useState('');
-    const [response, setResponse] = useState('');
-    const [loading, setLoading] = useState(false);
+const app = express();
+const port = process.env.PORT || 3000;
 
-    const sendMessage = async () => {
-        if (!message.trim()) return;
-        setLoading(true);
-        setResponse('');
+app.use(cors());
+app.use(express.json());
 
-        try {
-            const res = await fetch('https://my-home-backend-9j56.onrender.com/chat', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ message }),
-            });
+const supabase = createClient(
+    process.env.SUPABASE_URL,
+    process.env.SUPABASE_KEY
+);
 
-            const reader = res.body.getReader();
-            const decoder = new TextDecoder();
-            let fullText = '';
+app.get('/health', (req, res) => {
+    res.json({ status: 'ok', message: '后端服务正常运行！' });
+});
 
-            while (true) {
-                const { done, value } = await reader.read();
-                if (done) break;
-                const chunk = decoder.decode(value);
-                const lines = chunk.split('\\\\n');
-                for (const line of lines) {
-                    if (line.startsWith('data: ')) {
-                        const jsonStr = line.replace('data: ', '');
-                        if (jsonStr === '[DONE]') continue;
-                        try {
-                            const json = JSON.parse(jsonStr);
-                            const content = json.choices?.[0]?.delta?.content || '';
-                            fullText += content;
-                            setResponse(fullText);
-                        } catch (e) {}
-                    }
-                }
-            }
+app.get('/test-db', async (req, res) => {
+    try {
+        const { data, error } = await supabase.from('sessions').select('*').limit(1);
+        if (error) throw error;
+        res.json({ success: true, message: '数据库连接成功！', data });
+    } catch (error) {
+        res.status(500).json({ success: false, message: error.message });
+    }
+});
 
-            if (!fullText) {
-                setResponse('无回复');
-            }
+app.post('/chat', async (req, res) => {
+    const { message } = req.body;
 
-        } catch (error) {
-            setResponse('? 请求失败');
+    if (!message) {
+        return res.status(400).json({ error: '消息不能为空' });
+    }
+
+    try {
+        const response = await fetch('https://xn--vduyey89e.com/v1/chat/completions', {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${process.env.CLAUDE_API_KEY}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                model: '[特特价次kiro]claude-opus-4-6',
+                messages: [
+                    { role: 'user', content: message }
+                ],
+                stream: true,
+                max_tokens: 1024
+            })
+        });
+
+        res.setHeader('Content-Type', 'text/event-stream');
+        res.setHeader('Cache-Control', 'no-cache');
+        res.setHeader('Connection', 'keep-alive');
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            const chunk = decoder.decode(value);
+            res.write(chunk);
         }
-        setLoading(false);
-    };
 
-    return (
-        <div className="app">
-            <h1>?? 鱼说</h1>
-            <div className="chat-box">
-                <textarea
-                    value={message}
-                    onChange={(e) => setMessage(e.target.value)}
-                    placeholder="输入消息..."
-                    rows={3}
-                />
-                <button onClick={sendMessage} disabled={loading}>
-                    {loading ? '发送中...' : '发送'}
-                </button>
-                <div className="response-box">
-                    <strong>回复：</strong>
-                    <p>{response || '等待回复...'}</p>
-                </div>
-            </div>
-        </div>
-    );
-}
+        res.end();
 
-export default App;
+    } catch (error) {
+        console.error('请求失败:', error);
+        res.status(500).json({ error: '服务器内部错误' });
+    }
+});
+
+app.listen(port, () => {
+    console.log(`后端服务已启动: http://localhost:${port}`);
+    console.log(`健康检查: http://localhost:${port}/health`);
+    console.log(`数据库测试: http://localhost:${port}/test-db`);
+});
