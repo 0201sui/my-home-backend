@@ -42,7 +42,7 @@ app.post('/chat', async (req, res) => {
                 'Authorization': `Bearer ${process.env.CLAUDE_API_KEY}`
             },
             body: JSON.stringify({
-                model: 'claude-3-sonnet-20240229',
+                model: 'claude-opus-4-6',
                 max_tokens: 1024,
                 messages: [{ role: 'user', content: message }]
             })
