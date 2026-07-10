@@ -112,7 +112,6 @@ app.get('/settings', async (req, res) => {
       .limit(1)
       .single();
     if (error && error.code === 'PGRST116') {
-      // 没有设置记录，返回默认值
       res.json({ settings: {
         system_prompt: '你是一个温暖、有爱的AI伙伴。',
         temperature: 0.7,
@@ -136,7 +135,6 @@ app.put('/settings', async (req, res) => {
     const updates = req.body;
     updates.updated_at = new Date().toISOString();
 
-    // 先查是否有记录
     const { data: existing } = await supabase.from('settings').select('id').limit(1).single();
 
     if (existing) {
@@ -206,6 +204,7 @@ app.post('/chat', async (req, res) => {
       .select('summary')
       .order('timestamp', { ascending: false })
       .limit(5);
+
     if (memories && memories.length > 0) {
       memoryContext = '以下是之前对话的记忆摘要：\n' + memories.map(m => m.summary).join('\n') + '\n\n';
     }
@@ -255,7 +254,6 @@ app.post('/chat', async (req, res) => {
 
 // ===== 调用 AI 模型 =====
 async function callModel(messages, modelName, settings) {
-  // 根据模型名称选择 API
   let apiUrl, apiKey, modelId;
 
   if (modelName === 'deepseek') {
@@ -263,7 +261,6 @@ async function callModel(messages, modelName, settings) {
     apiKey = process.env.DEEPSEEK_API_KEY;
     modelId = 'deepseek-chat';
   } else {
-    // 默认使用 Claude（通过中转站）
     apiUrl = 'https://xn--vduyey89e.com/v1/chat/completions';
     apiKey = process.env.CLAUDE_API_KEY;
     modelId = '[特特价次kiro]claude-opus-4-6';
@@ -294,10 +291,9 @@ async function callModel(messages, modelName, settings) {
   return data.choices?.[0]?.message?.content || '无回复';
 }
 
-// ===== 记忆压缩 =====
+// ===== 记忆压缩（自动触发，带关键词提取） =====
 async function checkAndCompress(sessionId, settings) {
   try {
-    // 获取当前会话所有可见消息
     const { data: allMessages } = await supabase
       .from('messages')
       .select('id, role, content, created_at')
@@ -307,31 +303,28 @@ async function checkAndCompress(sessionId, settings) {
 
     if (!allMessages) return;
 
-    // 估算 token 数（简单按字符数 / 2 估算中文）
     const totalChars = allMessages.reduce((sum, m) => sum + m.content.length, 0);
     const estimatedTokens = Math.ceil(totalChars / 2);
 
-    // 如果没超过阈值，不压缩
     if (estimatedTokens < (settings.compress_threshold || 4000)) return;
 
     console.log(`Token 估算: ${estimatedTokens}，超过阈值 ${settings.compress_threshold}，开始压缩...`);
 
-    // 保留最近几轮，压缩更早的
     const keepCount = (settings.compress_keep_rounds || 6) * 2;
     if (allMessages.length <= keepCount) return;
 
     const toCompress = allMessages.slice(0, allMessages.length - keepCount);
-
-    // 组装要压缩的内容
     const compressContent = toCompress.map(m => `${m.role}: ${m.content}`).join('\n');
 
-    // 调用 DeepSeek 做压缩摘要（便宜）
+    // 改进的压缩提示词：同时提取关键词
     const summaryMessages = [
-      { role: 'system', content: '你是一个记忆压缩助手。请将以下对话内容压缩成一段简短的摘要，保留关键信息、情感和重要细节。用第三人称描述。控制在200字以内。' },
+      {
+        role: 'system',
+        content: '你是一个记忆压缩助手。请将以下对话内容压缩，并提取关键词。请严格按JSON格式回复：{"title":"简短标题10字以内","summary":"压缩摘要200字以内，保留关键信息和情感","keywords":["关键词1","关键词2","关键词3"]}'
+      },
       { role: 'user', content: compressContent }
     ];
 
-    let summary;
     const compressApiKey = process.env.DEEPSEEK_API_KEY || process.env.CLAUDE_API_KEY;
     const compressApiUrl = process.env.DEEPSEEK_API_KEY
       ? 'https://api.deepseek.com/v1/chat/completions'
@@ -350,22 +343,43 @@ async function checkAndCompress(sessionId, settings) {
         model: compressModel,
         messages: summaryMessages,
         stream: false,
-        max_tokens: 300,
+        max_tokens: 400,
         temperature: 0.3
       })
     });
 
     const compressData = await compressResponse.json();
-    summary = compressData.choices?.[0]?.message?.content;
+    const replyContent = compressData.choices?.[0]?.message?.content;
 
-    if (!summary) {
+    if (!replyContent) {
       console.error('压缩失败，跳过');
       return;
     }
 
-    // 保存摘要到 memories 表
+    // 尝试解析 JSON 格式的回复
+    let title = '对话记忆';
+    let summary = replyContent;
+    let keywords = [];
+
+    try {
+      const jsonMatch = replyContent.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        const parsed = JSON.parse(jsonMatch[0]);
+        title = parsed.title || '对话记忆';
+        summary = parsed.summary || replyContent;
+        keywords = parsed.keywords || [];
+      }
+    } catch (e) {
+      // JSON解析失败，用原文作为摘要
+      console.log('压缩结果非JSON格式，使用原文作为摘要');
+    }
+
+    // 保存摘要到 memories 表（包含关键词）
     await supabase.from('memories').insert({
+      session_id: 'global',
+      title: title,
       summary: summary,
+      keywords: keywords,
       timestamp: new Date().toISOString(),
       conversation_id: sessionId.toString()
     });
@@ -377,15 +391,289 @@ async function checkAndCompress(sessionId, settings) {
       .update({ visible: false })
       .in('id', idsToHide);
 
-    console.log(`压缩完成！隐藏了 ${idsToHide.length} 条消息，生成摘要。`);
+    console.log(`压缩完成！隐藏了 ${idsToHide.length} 条消息，生成摘要: ${title}`);
 
   } catch (err) {
     console.error('压缩过程出错:', err);
-    // 压缩失败不影响正常对话
   }
 }
 
+// ===== 记忆宫殿接口 =====
+
+// 获取所有记忆（支持按关键词筛选）
+app.get('/memories', async (req, res) => {
+  try {
+    const { keyword } = req.query;
+    let query = supabase
+      .from('memories')
+      .select('*')
+      .order('timestamp', { ascending: false });
+
+    if (keyword) {
+      query = query.contains('keywords', [keyword]);
+    }
+
+    const { data, error } = await query;
+    if (error) throw error;
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 搜索记忆（关键词 + 内容模糊匹配）
+app.get('/memories/search', async (req, res) => {
+  try {
+    const { q } = req.query;
+    if (!q) return res.json({ success: true, data: [] });
+
+    // 按关键词精确匹配
+    const { data: keywordMatches, error: err1 } = await supabase
+      .from('memories')
+      .select('*')
+      .contains('keywords', [q])
+      .order('timestamp', { ascending: false });
+
+    if (err1) throw err1;
+
+    // 按摘要内容模糊匹配
+    const { data: contentMatches, error: err2 } = await supabase
+      .from('memories')
+      .select('*')
+      .ilike('summary', '%' + q + '%')
+      .order('timestamp', { ascending: false });
+
+    if (err2) throw err2;
+
+    // 按标题模糊匹配
+    const { data: titleMatches, error: err3 } = await supabase
+      .from('memories')
+      .select('*')
+      .ilike('title', '%' + q + '%')
+      .order('timestamp', { ascending: false });
+
+    if (err3) throw err3;
+
+    // 合并去重
+    const seen = new Set();
+    const merged = [];
+    [...keywordMatches, ...titleMatches, ...contentMatches].forEach(item => {
+      if (!seen.has(item.id)) {
+        seen.add(item.id);
+        merged.push(item);
+      }
+    });
+
+    res.json({ success: true, data: merged });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 获取所有关键词统计
+app.get('/memories/keywords', async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('memories')
+      .select('keywords');
+
+    if (error) throw error;
+
+    const keywordCount = {};
+    data.forEach(row => {
+      if (row.keywords && Array.isArray(row.keywords)) {
+        row.keywords.forEach(kw => {
+          keywordCount[kw] = (keywordCount[kw] || 0) + 1;
+        });
+      }
+    });
+
+    const keywords = Object.entries(keywordCount)
+      .map(([keyword, count]) => ({ keyword, count }))
+      .sort((a, b) => b.count - a.count);
+
+    res.json({ success: true, data: keywords });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 手动创建记忆
+app.post('/memories', async (req, res) => {
+  try {
+    const { title, summary, keywords } = req.body;
+    if (!summary) {
+      return res.status(400).json({ error: '摘要内容不能为空' });
+    }
+
+    const { data, error } = await supabase
+      .from('memories')
+      .insert({
+        session_id: 'global',
+        title: title || '',
+        summary,
+        keywords: keywords || [],
+        timestamp: new Date().toISOString(),
+        conversation_id: 'manual'
+      })
+      .select()
+      .single();
+
+    if (error) throw error;
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 手动触发压缩某个会话
+app.post('/memories/compress/:sessionId', async (req, res) => {
+  try {
+    const { sessionId } = req.params;
+
+    const { data: messages, error: msgErr } = await supabase
+      .from('messages')
+      .select('*')
+      .eq('session_id', sessionId)
+      .eq('visible', true)
+      .order('created_at', { ascending: true });
+
+    if (msgErr) throw msgErr;
+
+    if (!messages || messages.length < 4) {
+      return res.status(400).json({ error: '对话内容太少，无需压缩' });
+    }
+
+    const conversationText = messages.map(m => {
+      const role = m.role === 'user' ? '用户' : 'AI';
+      return role + ': ' + m.content;
+    }).join('\n');
+
+    const compressPrompt = '你是一个记忆压缩专家。请阅读以下对话内容，完成两件事：\n\n1. 用简洁的语言总结对话的核心内容（不超过150字），保留关键信息和情感要点\n2. 提取3-5个关键词，用于后续检索这段记忆\n\n请严格按以下JSON格式回复，不要包含其他内容：\n{"title": "简短标题（10字以内）", "summary": "压缩后的摘要", "keywords": ["关键词1", "关键词2", "关键词3"]}\n\n对话内容：\n' + conversationText;
+
+    const compressApiKey = process.env.DEEPSEEK_API_KEY || process.env.CLAUDE_API_KEY;
+    const compressApiUrl = process.env.DEEPSEEK_API_KEY
+      ? 'https://api.deepseek.com/v1/chat/completions'
+      : 'https://xn--vduyey89e.com/v1/chat/completions';
+    const compressModel = process.env.DEEPSEEK_API_KEY
+      ? 'deepseek-chat'
+      : '[特特价次kiro]claude-opus-4-6';
+
+    const deepseekResponse = await fetch(compressApiUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + compressApiKey
+      },
+      body: JSON.stringify({
+        model: compressModel,
+        messages: [{ role: 'user', content: compressPrompt }],
+        temperature: 0.3,
+        max_tokens: 500
+      })
+    });
+
+    if (!deepseekResponse.ok) {
+      const errText = await deepseekResponse.text();
+      throw new Error('模型API错误: ' + errText);
+    }
+
+    const deepseekData = await deepseekResponse.json();
+    const replyContent = deepseekData.choices[0].message.content;
+
+    let parsed;
+    try {
+      const jsonMatch = replyContent.match(/\{[\s\S]*\}/);
+      parsed = JSON.parse(jsonMatch[0]);
+    } catch (parseErr) {
+      parsed = {
+        title: '对话记忆',
+        summary: replyContent,
+        keywords: []
+      };
+    }
+
+    const { data: memory, error: memErr } = await supabase
+      .from('memories')
+      .insert({
+        session_id: 'global',
+        title: parsed.title || '对话记忆',
+        summary: parsed.summary,
+        keywords: parsed.keywords || [],
+        timestamp: new Date().toISOString(),
+        conversation_id: 'session_' + sessionId,
+        metadata: { source_session: sessionId, message_count: messages.length }
+      })
+      .select()
+      .single();
+
+    if (memErr) throw memErr;
+
+    // 保留最近6条消息，其余标记不可见
+    const keepCount = 6;
+    const messagesToHide = messages.slice(0, messages.length - keepCount);
+
+    if (messagesToHide.length > 0) {
+      const hideIds = messagesToHide.map(m => m.id);
+      await supabase
+        .from('messages')
+        .update({ visible: false })
+        .in('id', hideIds);
+    }
+
+    res.json({
+      success: true,
+      data: memory,
+      compressed_count: messagesToHide.length
+    });
+  } catch (err) {
+    console.error('压缩记忆失败:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 更新记忆（编辑关键词、标题、摘要）
+app.put('/memories/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { title, summary, keywords } = req.body;
+
+    const updateData = {};
+    if (title !== undefined) updateData.title = title;
+    if (summary !== undefined) updateData.summary = summary;
+    if (keywords !== undefined) updateData.keywords = keywords;
+
+    const { data, error } = await supabase
+      .from('memories')
+      .update(updateData)
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (error) throw error;
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 删除记忆
+app.delete('/memories/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { error } = await supabase
+      .from('memories')
+      .delete()
+      .eq('id', id);
+
+    if (error) throw error;
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ===== 启动服务 =====
 app.listen(port, () => {
-  console.log(`Bunny's Home 后端运行在端口 ${port}`);
+  console.log(`鱼说后端运行在端口 ${port}`);
 });
