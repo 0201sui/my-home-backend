@@ -692,7 +692,35 @@ app.post('/test', async (req, res) => {
   }
 });
 
-// ===== 启动服务 =====
-app.listen(port, () => {
-  console.log(`鱼说后端运行在端口 ${port}`);
-});
+// ===== 拉取模型列表 =====
+app.post('/fetch-models', async (req, res) => {
+  const { base_url, api_key } = req.body;
+
+  if (!base_url || !api_key) {
+    return res.status(400).json({ error: '缺少 base_url 或 api_key' });
+  }
+
+  try {
+    const apiUrl = base_url.replace(/\/+$/, '') + '/v1/models';
+    const response = await fetch(apiUrl, {
+      method: 'GET',
+      headers: {
+        'Authorization': 'Bearer ' + api_key,
+        'Content-Type': 'application/json'
+      }
+    });
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      return res.json({ success: false, error: data.error?.message || '拉取失败' });
+    }
+
+    // 标准 OpenAI 格式：data.data 是模型数组
+    const models = (data.data || [])
+      .map(m => m.id)
+      .filter(Boolean)
+      .sort();
+
+    res.json({ success: true, models });
+  } catch (err) {
