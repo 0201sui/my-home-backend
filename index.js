@@ -151,9 +151,9 @@ app.put('/settings', async (req, res) => {
   }
 });
 
-// ===== 核心对话接口（去掉了自动压缩） =====
+// ===== 核心对话接口 =====
 app.post('/chat', async (req, res) => {
-  const { message, session_id, model } = req.body;
+  const { message, session_id, model, api_key, base_url } = req.body;
 
   if (!message) return res.status(400).json({ error: '消息不能为空' });
   if (!session_id) return res.status(400).json({ error: '缺少 session_id' });
@@ -178,7 +178,6 @@ app.post('/chat', async (req, res) => {
     const { data: settingsData } = await supabase.from('settings').select('*').limit(1).single();
     if (settingsData) settings = settingsData;
 
-    // 加载记忆摘要
     let memoryContext = '';
     const { data: memories } = await supabase
       .from('memories')
@@ -190,7 +189,6 @@ app.post('/chat', async (req, res) => {
       memoryContext = '以下是之前对话的记忆摘要：\n' + memories.map(m => m.summary).join('\n') + '\n\n';
     }
 
-    // 加载历史消息
     const { data: history } = await supabase
       .from('messages')
       .select('role, content')
@@ -207,7 +205,7 @@ app.post('/chat', async (req, res) => {
       ...recentHistory
     ];
 
-    const aiResponse = await callModel(contextMessages, model, settings);
+    const aiResponse = await callModel(contextMessages, model, settings, base_url, api_key);
 
     await supabase.from('messages').insert({
       session_id,
@@ -217,14 +215,7 @@ app.post('/chat', async (req, res) => {
       created_at: new Date().toISOString()
     });
 
-    // 返回当前未压缩消息数量，前端可以用来提醒用户
-    const { count } = await supabase
-      .from('messages')
-      .select('*', { count: 'exact', head: true })
-      .eq('session_id', session_id)
-      .eq('visible', true);
-
-    res.json({ reply: aiResponse, message_count: count });
+    res.json({ reply: aiResponse });
 
   } catch (error) {
     console.error('对话错误:', error);
@@ -233,10 +224,14 @@ app.post('/chat', async (req, res) => {
 });
 
 // ===== 调用 AI 模型 =====
-async function callModel(messages, modelName, settings) {
+async function callModel(messages, modelName, settings, customBaseUrl, customApiKey) {
   let apiUrl, apiKey, modelId;
 
-  if (modelName === 'deepseek') {
+  if (customBaseUrl && customApiKey) {
+    apiUrl = customBaseUrl.replace(/\/+$/, '') + '/v1/chat/completions';
+    apiKey = customApiKey;
+    modelId = modelName;
+  } else if (modelName === 'deepseek') {
     apiUrl = 'https://api.deepseek.com/v1/chat/completions';
     apiKey = process.env.DEEPSEEK_API_KEY;
     modelId = 'deepseek-chat';
@@ -271,7 +266,6 @@ async function callModel(messages, modelName, settings) {
 
 // ===== 记忆宫殿接口 =====
 
-// 获取所有记忆
 app.get('/memories', async (req, res) => {
   try {
     const { keyword } = req.query;
@@ -292,40 +286,27 @@ app.get('/memories', async (req, res) => {
   }
 });
 
-// 搜索记忆
 app.get('/memories/search', async (req, res) => {
   try {
     const { q } = req.query;
     if (!q) return res.json({ success: true, data: [] });
 
     const { data: keywordMatches, error: err1 } = await supabase
-      .from('memories')
-      .select('*')
-      .contains('keywords', [q])
-      .order('timestamp', { ascending: false });
+      .from('memories').select('*').contains('keywords', [q]).order('timestamp', { ascending: false });
     if (err1) throw err1;
 
     const { data: contentMatches, error: err2 } = await supabase
-      .from('memories')
-      .select('*')
-      .ilike('summary', '%' + q + '%')
-      .order('timestamp', { ascending: false });
+      .from('memories').select('*').ilike('summary', '%' + q + '%').order('timestamp', { ascending: false });
     if (err2) throw err2;
 
     const { data: titleMatches, error: err3 } = await supabase
-      .from('memories')
-      .select('*')
-      .ilike('title', '%' + q + '%')
-      .order('timestamp', { ascending: false });
+      .from('memories').select('*').ilike('title', '%' + q + '%').order('timestamp', { ascending: false });
     if (err3) throw err3;
 
     const seen = new Set();
     const merged = [];
     [...keywordMatches, ...titleMatches, ...contentMatches].forEach(item => {
-      if (!seen.has(item.id)) {
-        seen.add(item.id);
-        merged.push(item);
-      }
+      if (!seen.has(item.id)) { seen.add(item.id); merged.push(item); }
     });
 
     res.json({ success: true, data: merged });
@@ -334,7 +315,6 @@ app.get('/memories/search', async (req, res) => {
   }
 });
 
-// 获取所有关键词统计
 app.get('/memories/keywords', async (req, res) => {
   try {
     const { data, error } = await supabase.from('memories').select('keywords');
@@ -343,9 +323,7 @@ app.get('/memories/keywords', async (req, res) => {
     const keywordCount = {};
     data.forEach(row => {
       if (row.keywords && Array.isArray(row.keywords)) {
-        row.keywords.forEach(kw => {
-          keywordCount[kw] = (keywordCount[kw] || 0) + 1;
-        });
+        row.keywords.forEach(kw => { keywordCount[kw] = (keywordCount[kw] || 0) + 1; });
       }
     });
 
@@ -359,7 +337,6 @@ app.get('/memories/keywords', async (req, res) => {
   }
 });
 
-// 手动创建记忆
 app.post('/memories', async (req, res) => {
   try {
     const { title, summary, keywords } = req.body;
@@ -385,14 +362,12 @@ app.post('/memories', async (req, res) => {
   }
 });
 
-// 手动压缩当前会话（不重复压缩 + 字数控制）
 app.post('/memories/compress/:sessionId', async (req, res) => {
   try {
     const { sessionId } = req.params;
     const { max_words, delete_after } = req.body || {};
     const wordLimit = max_words || 200;
 
-    // 查找该会话上次压缩的时间点
     const { data: lastMemory } = await supabase
       .from('memories')
       .select('timestamp')
@@ -401,7 +376,6 @@ app.post('/memories/compress/:sessionId', async (req, res) => {
       .limit(1)
       .single();
 
-    // 获取上次压缩之后的新消息
     let query = supabase
       .from('messages')
       .select('*')
@@ -425,16 +399,7 @@ app.post('/memories/compress/:sessionId', async (req, res) => {
       return role + ': ' + m.content;
     }).join('\n');
 
-    const compressPrompt = `你是一个记忆压缩专家。请阅读以下对话内容，完成两件事：
-
-1. 用简洁的语言总结对话的核心内容，严格控制在${wordLimit}字以内，保留关键信息和情感要点
-2. 提取3-5个关键词，用于后续检索这段记忆
-
-请严格按以下JSON格式回复，不要包含其他内容：
-{"title": "简短标题（10字以内）", "summary": "压缩后的摘要（${wordLimit}字以内）", "keywords": ["关键词1", "关键词2", "关键词3"]}
-
-对话内容：
-${conversationText}`;
+    const compressPrompt = `你是一个记忆压缩专家。请阅读以下对话内容，完成两件事：\n\n1. 用简洁的语言总结对话的核心内容，严格控制在${wordLimit}字以内，保留关键信息和情感要点\n2. 提取3-5个关键词，用于后续检索这段记忆\n\n请严格按以下JSON格式回复，不要包含其他内容：\n{"title": "简短标题（10字以内）", "summary": "压缩后的摘要（${wordLimit}字以内）", "keywords": ["关键词1", "关键词2", "关键词3"]}\n\n对话内容：\n${conversationText}`;
 
     const compressApiKey = process.env.DEEPSEEK_API_KEY || process.env.CLAUDE_API_KEY;
     const compressApiUrl = process.env.DEEPSEEK_API_KEY
@@ -483,49 +448,30 @@ ${conversationText}`;
         keywords: parsed.keywords || [],
         timestamp: new Date().toISOString(),
         conversation_id: 'session_' + sessionId,
-        metadata: {
-          source_session: sessionId,
-          message_count: messages.length,
-          message_ids: messages.map(m => m.id)
-        }
+        metadata: { source_session: sessionId, message_count: messages.length, message_ids: messages.map(m => m.id) }
       })
       .select()
       .single();
 
     if (memErr) throw memErr;
 
-    // 如果用户选择删除对应聊天记录
     if (delete_after) {
       const hideIds = messages.map(m => m.id);
-      await supabase
-        .from('messages')
-        .update({ visible: false })
-        .in('id', hideIds);
+      await supabase.from('messages').update({ visible: false }).in('id', hideIds);
     }
 
-    res.json({
-      success: true,
-      data: memory,
-      message_count: messages.length,
-      deleted: !!delete_after
-    });
+    res.json({ success: true, data: memory, message_count: messages.length, deleted: !!delete_after });
   } catch (err) {
     console.error('压缩记忆失败:', err);
     res.status(500).json({ error: err.message });
   }
 });
 
-// 压缩后单独删除聊天记录
 app.post('/memories/delete-source/:memoryId', async (req, res) => {
   try {
     const { memoryId } = req.params;
-
     const { data: memory, error } = await supabase
-      .from('memories')
-      .select('metadata')
-      .eq('id', memoryId)
-      .single();
-
+      .from('memories').select('metadata').eq('id', memoryId).single();
     if (error) throw error;
 
     const messageIds = memory?.metadata?.message_ids;
@@ -533,18 +479,13 @@ app.post('/memories/delete-source/:memoryId', async (req, res) => {
       return res.status(400).json({ error: '没有关联的聊天记录' });
     }
 
-    await supabase
-      .from('messages')
-      .update({ visible: false })
-      .in('id', messageIds);
-
+    await supabase.from('messages').update({ visible: false }).in('id', messageIds);
     res.json({ success: true, deleted_count: messageIds.length });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// 合并多条记忆
 app.post('/memories/merge', async (req, res) => {
   try {
     const { memory_ids, max_words } = req.body;
@@ -555,32 +496,13 @@ app.post('/memories/merge', async (req, res) => {
     }
 
     const { data: memoriesToMerge, error } = await supabase
-      .from('memories')
-      .select('*')
-      .in('id', memory_ids);
-
+      .from('memories').select('*').in('id', memory_ids);
     if (error) throw error;
 
-    const mergeContent = memoriesToMerge.map(m => {
-      return `【${m.title || '无标题'}】${m.summary}`;
-    }).join('\n\n');
-
+    const mergeContent = memoriesToMerge.map(m => `【${m.title || '无标题'}】${m.summary}`).join('\n\n');
     const allKeywords = [...new Set(memoriesToMerge.flatMap(m => m.keywords || []))];
 
-    const mergePrompt = `你是一个记忆压缩专家。以下是多段已有的记忆摘要，请将它们合并压缩为一段更精简的总结。
-
-要求：
-1. 合并后的摘要严格控制在${wordLimit}字以内
-2. 保留最重要的信息和情感要点，去除重复内容
-3. 从已有关键词中保留最重要的3-5个，也可以新增
-
-请严格按JSON格式回复：
-{"title": "合并后的标题（10字以内）", "summary": "合并后的摘要（${wordLimit}字以内）", "keywords": ["关键词1", "关键词2", "关键词3"]}
-
-已有记忆：
-${mergeContent}
-
-已有关键词：${allKeywords.join(', ')}`;
+    const mergePrompt = `你是一个记忆压缩专家。以下是多段已有的记忆摘要，请将它们合并压缩为一段更精简的总结。\n\n要求：\n1. 合并后的摘要严格控制在${wordLimit}字以内\n2. 保留最重要的信息和情感要点，去除重复内容\n3. 从已有关键词中保留最重要的3-5个\n\n请严格按JSON格式回复：\n{"title": "合并后的标题（10字以内）", "summary": "合并后的摘要（${wordLimit}字以内）", "keywords": ["关键词1", "关键词2", "关键词3"]}\n\n已有记忆：\n${mergeContent}\n\n已有关键词：${allKeywords.join(', ')}`;
 
     const compressApiKey = process.env.DEEPSEEK_API_KEY || process.env.CLAUDE_API_KEY;
     const compressApiUrl = process.env.DEEPSEEK_API_KEY
@@ -592,16 +514,8 @@ ${mergeContent}
 
     const mergeResponse = await fetch(compressApiUrl, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': 'Bearer ' + compressApiKey
-      },
-      body: JSON.stringify({
-        model: compressModel,
-        messages: [{ role: 'user', content: mergePrompt }],
-        temperature: 0.3,
-        max_tokens: 600
-      })
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + compressApiKey },
+      body: JSON.stringify({ model: compressModel, messages: [{ role: 'user', content: mergePrompt }], temperature: 0.3, max_tokens: 600 })
     });
 
     if (!mergeResponse.ok) {
@@ -620,7 +534,6 @@ ${mergeContent}
       parsed = { title: '合并记忆', summary: replyContent, keywords: allKeywords.slice(0, 5) };
     }
 
-    // 创建新的合并记忆
     const { data: newMemory, error: insertErr } = await supabase
       .from('memories')
       .insert({
@@ -637,9 +550,7 @@ ${mergeContent}
 
     if (insertErr) throw insertErr;
 
-    // 删除原始记忆
     await supabase.from('memories').delete().in('id', memory_ids);
-
     res.json({ success: true, data: newMemory });
   } catch (err) {
     console.error('合并记忆失败:', err);
@@ -647,24 +558,17 @@ ${mergeContent}
   }
 });
 
-// 更新记忆
 app.put('/memories/:id', async (req, res) => {
   try {
     const { id } = req.params;
     const { title, summary, keywords } = req.body;
-
     const updateData = {};
     if (title !== undefined) updateData.title = title;
     if (summary !== undefined) updateData.summary = summary;
     if (keywords !== undefined) updateData.keywords = keywords;
 
     const { data, error } = await supabase
-      .from('memories')
-      .update(updateData)
-      .eq('id', id)
-      .select()
-      .single();
-
+      .from('memories').update(updateData).eq('id', id).select().single();
     if (error) throw error;
     res.json({ success: true, data });
   } catch (err) {
@@ -672,7 +576,6 @@ app.put('/memories/:id', async (req, res) => {
   }
 });
 
-// 删除记忆
 app.delete('/memories/:id', async (req, res) => {
   try {
     const { id } = req.params;
@@ -686,125 +589,106 @@ app.delete('/memories/:id', async (req, res) => {
 
 // ===== 导出/导入 =====
 
-// 导出某个会话的聊天记录
 app.get('/export/chat/:sessionId', async (req, res) => {
   try {
     const { sessionId } = req.params;
-
-    const { data: session } = await supabase
-      .from('sessions')
-      .select('*')
-      .eq('id', sessionId)
-      .single();
-
+    const { data: session } = await supabase.from('sessions').select('*').eq('id', sessionId).single();
     const { data: messages, error } = await supabase
-      .from('messages')
-      .select('*')
-      .eq('session_id', sessionId)
-      .order('created_at', { ascending: true });
-
+      .from('messages').select('*').eq('session_id', sessionId).order('created_at', { ascending: true });
     if (error) throw error;
-
-    res.json({
-      success: true,
-      data: {
-        session: session,
-        messages: messages,
-        exported_at: new Date().toISOString()
-      }
-    });
+    res.json({ success: true, data: { session, messages, exported_at: new Date().toISOString() } });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// 导入聊天记录
 app.post('/import/chat', async (req, res) => {
   try {
     const { session, messages } = req.body;
+    if (!messages || messages.length === 0) return res.status(400).json({ error: '没有可导入的消息' });
 
-    if (!messages || messages.length === 0) {
-      return res.status(400).json({ error: '没有可导入的消息' });
-    }
-
-    // 创建新会话
     const { data: newSession, error: sessionErr } = await supabase
       .from('sessions')
-      .insert({
-        name: (session?.name || '导入的对话') + ' (导入)',
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString()
-      })
-      .select()
-      .single();
-
+      .insert({ name: (session?.name || '导入的对话') + ' (导入)', created_at: new Date().toISOString(), updated_at: new Date().toISOString() })
+      .select().single();
     if (sessionErr) throw sessionErr;
 
-    // 插入消息（更新session_id为新会话）
     const messagesToInsert = messages.map(m => ({
-      session_id: newSession.id,
-      role: m.role,
-      content: m.content,
+      session_id: newSession.id, role: m.role, content: m.content,
       visible: m.visible !== undefined ? m.visible : true,
       created_at: m.created_at || new Date().toISOString()
     }));
 
     const { error: msgErr } = await supabase.from('messages').insert(messagesToInsert);
     if (msgErr) throw msgErr;
-
     res.json({ success: true, session: newSession, imported_count: messagesToInsert.length });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// 导出所有记忆
 app.get('/export/memories', async (req, res) => {
   try {
-    const { data, error } = await supabase
-      .from('memories')
-      .select('*')
-      .order('timestamp', { ascending: false });
-
+    const { data, error } = await supabase.from('memories').select('*').order('timestamp', { ascending: false });
     if (error) throw error;
-
-    res.json({
-      success: true,
-      data: {
-        memories: data,
-        exported_at: new Date().toISOString()
-      }
-    });
+    res.json({ success: true, data: { memories: data, exported_at: new Date().toISOString() } });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// 导入记忆
 app.post('/import/memories', async (req, res) => {
   try {
     const { memories } = req.body;
-
-    if (!memories || memories.length === 0) {
-      return res.status(400).json({ error: '没有可导入的记忆' });
-    }
+    if (!memories || memories.length === 0) return res.status(400).json({ error: '没有可导入的记忆' });
 
     const memoriesToInsert = memories.map(m => ({
-      session_id: 'global',
-      title: m.title || '',
-      summary: m.summary,
-      keywords: m.keywords || [],
-      timestamp: m.timestamp || new Date().toISOString(),
-      conversation_id: m.conversation_id || 'imported',
-      metadata: m.metadata || {}
+      session_id: 'global', title: m.title || '', summary: m.summary,
+      keywords: m.keywords || [], timestamp: m.timestamp || new Date().toISOString(),
+      conversation_id: m.conversation_id || 'imported', metadata: m.metadata || {}
     }));
 
     const { error } = await supabase.from('memories').insert(memoriesToInsert);
     if (error) throw error;
-
     res.json({ success: true, imported_count: memoriesToInsert.length });
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+// ===== 测试 API 连接 =====
+app.post('/test', async (req, res) => {
+  const { base_url, api_key, model } = req.body;
+
+  if (!base_url || !api_key || !model) {
+    return res.status(400).json({ error: '缺少 base_url、api_key 或 model' });
+  }
+
+  try {
+    const apiUrl = base_url.replace(/\/+$/, '') + '/v1/chat/completions';
+    const response = await fetch(apiUrl, {
+      method: 'POST',
+      headers: {
+        'Authorization': 'Bearer ' + api_key,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        model: model,
+        messages: [{ role: 'user', content: 'Hi' }],
+        max_tokens: 5,
+        temperature: 0
+      })
+    });
+
+    const data = await response.json();
+
+    if (response.ok && data.choices) {
+      res.json({ success: true, message: '连接成功' });
+    } else {
+      res.json({ success: false, error: data.error?.message || JSON.stringify(data) });
+    }
+  } catch (err) {
+    res.json({ success: false, error: err.message });
   }
 });
 
