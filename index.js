@@ -153,7 +153,7 @@ app.put('/settings', async (req, res) => {
 
 // ===== 核心对话接口 =====
 app.post('/chat', async (req, res) => {
-  const { message, session_id, model, api_key, base_url } = req.body;
+const { message, session_id, model, api_key, base_url, current_time, timezone } = req.body;
 
   if (!message) return res.status(400).json({ error: '消息不能为空' });
   if (!session_id) return res.status(400).json({ error: '缺少 session_id' });
@@ -199,14 +199,14 @@ app.post('/chat', async (req, res) => {
     const maxRounds = settings.max_context_rounds * 2;
     const recentHistory = history ? history.slice(-maxRounds) : [];
 
-    const systemContent = (settings.system_prompt || '') + '\n\n' + memoryContext;
-    const contextMessages = [
-      { role: 'system', content: systemContent.trim() },
-      ...recentHistory
-    ];
-
+ 
     const aiResponse = await callModel(contextMessages, model, settings, base_url, api_key);
-
+const timeContext = current_time ? `当前时间：${current_time}（${timezone || 'Asia/Shanghai'}）。请根据时间自然调整问候语，如被问到时间可直接回答，平时不要主动重复时间。` : '';
+const systemContent = [settings.system_prompt || '', timeContext, memoryContext].filter(Boolean).join('\n\n');
+const contextMessages = [
+  { role: 'system', content: systemContent.trim() },
+  ...recentHistory
+];
     await supabase.from('messages').insert({
       session_id,
       role: 'assistant',
