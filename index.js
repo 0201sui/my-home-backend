@@ -726,10 +726,6 @@ app.post('/fetch-models', async (req, res) => {
     res.json({ success: false, error: err.message });
   }
 });
-  } catch (err) {
-    res.json({ success: false, error: err.message });
-  }
-});
 
 app.listen(port, () => {
   console.log(`服务器运行在端口 ${port}`);
