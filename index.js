@@ -95,7 +95,35 @@ app.get('/sessions/:id/messages', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+// 删除单条消息
+app.delete('/messages/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { error } = await supabase.from('messages').delete().eq('id', id);
+    if (error) throw error;
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
+// 编辑单条消息
+app.put('/messages/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { content } = req.body;
+    const { data, error } = await supabase
+      .from('messages')
+      .update({ content })
+      .eq('id', id)
+      .select()
+      .single();
+    if (error) throw error;
+    res.json({ success: true, message: data });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 // ===== 设置管理 =====
 
 app.get('/settings', async (req, res) => {
