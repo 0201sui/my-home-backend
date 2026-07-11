@@ -716,7 +716,6 @@ app.post('/fetch-models', async (req, res) => {
       return res.json({ success: false, error: data.error?.message || '拉取失败' });
     }
 
-    // 标准 OpenAI 格式：data.data 是模型数组
     const models = (data.data || [])
       .map(m => m.id)
       .filter(Boolean)
@@ -724,3 +723,14 @@ app.post('/fetch-models', async (req, res) => {
 
     res.json({ success: true, models });
   } catch (err) {
+    res.json({ success: false, error: err.message });
+  }
+});
+  } catch (err) {
+    res.json({ success: false, error: err.message });
+  }
+});
+
+app.listen(port, () => {
+  console.log(`服务器运行在端口 ${port}`);
+});
