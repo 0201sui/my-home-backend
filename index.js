@@ -37,7 +37,7 @@ function quotedPreviewOf(m) {
 }
 
 const defaultSettings = {
-  system_prompt: '你可以把回复分成多条消息发送（用空行分隔每条，简单回复保持一条即可）。当你想用语音回复时，用 [voice]文字内容[/voice] 标记。请避免过度使用 emoji、波浪号、颜文字或贴纸，保持自然、克制的表达。',
+  system_prompt: '你可以把回复分成多条消息发送（用空行分隔每条，简单回复保持一条即可）。除非用户明确要求或需要表达强烈情绪，否则优先用文字回复，不要频繁使用语音。当你需要语音回复时，用 [voice]文字内容[/voice] 标记。请避免过度使用 emoji、波浪号、颜文字或贴纸，保持自然、克制的表达。',
   temperature: 0.7,
   max_context_rounds: 20,
   compress_threshold: 4000,
@@ -568,7 +568,7 @@ app.post('/chat', async (req, res) => {
     const recentHistory = history.slice(-maxRounds);
 
     // 极简提示词 — 保留模型原生特性，只加功能指令
-    let sysContent = settings.system_prompt || '你可以把回复分成多条消息发送（用空行分隔每条，简单回复保持一条即可）。当你想用语音回复时，用 [voice]文字内容[/voice] 标记。请避免过度使用 emoji、波浪号、颜文字或贴纸，保持自然、克制的表达。';
+    let sysContent = settings.system_prompt || '你可以把回复分成多条消息发送（用空行分隔每条，简单回复保持一条即可）。除非用户明确要求或需要表达强烈情绪，否则优先用文字回复，不要频繁使用语音。当你需要语音回复时，用 [voice]文字内容[/voice] 标记。请避免过度使用 emoji、波浪号、颜文字或贴纸，保持自然、克制的表达。';
     if (memoryContext) sysContent += memoryContext;
 
     // 条件注入简介：只有填写了才给 AI 读
@@ -579,13 +579,20 @@ app.post('/chat', async (req, res) => {
       sysContent += `\n\n【AI简介】${mem.profile.aiName || '裴拟'}：${mem.profile.aiBio.trim()}`;
     }
 
-    // 时间感知（北京时间 + 周几）
-    const timeStr = now.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
+    // 时间感知（自然语言，AI 内心知晓，不向用户复读系统时间）
+    const y = now.getFullYear();
+    const mo = now.getMonth() + 1;
+    const d = now.getDate();
     const weekday = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'][now.getDay()];
-    sysContent += `\n\n【当前时间】现在是 ${timeStr}（北京时间，${weekday}）`;
+    const hh = now.getHours();
+    const mm = String(now.getMinutes()).padStart(2, '0');
+    const period = hh < 6 ? '凌晨' : hh < 12 ? '上午' : hh < 14 ? '中午' : hh < 18 ? '下午' : '晚上';
+    const hour12 = hh % 12 === 0 ? 12 : hh % 12;
+    const naturalTime = `${y}年${mo}月${d}日 ${weekday} ${period}${hour12}点${mm}分`;
+    sysContent += `\n\n【当前时间】当前是 ${naturalTime}（你内心知晓即可，不要用这段系统信息直接回复用户）。用户问时间时，用日常口吻简短回答，例如“现在快七点半啦”，不要出现“北京时间”“系统时间”这类字眼，也不要整段复述日期时间。`;
 
     // 引用功能说明（让 AI 知道可以引用 + 会被告知用户引用了什么）
-    sysContent += '\n\n【引用功能】当用户引用了某条消息，你会在用户消息开头看到「引用了XX的消息：...」。你也可以引用用户之前说的话来回应，写法是用 [quote]你要引用的内容[/quote] 包裹，被引用的内容会显示在你消息气泡的上方。';
+    sysContent += '\n\n【引用功能】当用户引用了某条消息，你会在用户消息开头看到「引用了XX的消息：...」，请据此回应。你也可以主动引用用户之前说的话来回应：用 [quote]你要引用的用户原话[/quote] 包裹，被引用的内容会显示在你消息气泡的上方（像微信那样）。在合适的时候（如回应用户的具体问题、延续对方的话题）使用引用会更自然贴心。';
 
     const contextMessages = [{ role: 'system', content: sysContent.trim() }, ...recentHistory];
 
