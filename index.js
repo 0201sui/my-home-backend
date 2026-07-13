@@ -1,6 +1,8 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
+const fs = require('fs');
+const path = require('path');
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -25,7 +27,45 @@ const mem = {
   profile: { userBio: '', aiBio: '', userName: '我', aiName: '裴拟' },
   _id: 1
 };
-function nextId() { return String(mem._id++); }
+function nextId() { const id = String(mem._id++); scheduleSave(); return id; }
+
+// ===== 文件持久化（重启后端也不丢聊天记录/记忆/设置，根治 AI 失忆）=====
+const DATA_DIR = path.join(__dirname, 'data');
+const STATE_FILE = path.join(DATA_DIR, 'state.json');
+let _saveTimer = null;
+function scheduleSave() {
+  if (_saveTimer) clearTimeout(_saveTimer);
+  _saveTimer = setTimeout(() => {
+    try {
+      if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+      fs.writeFileSync(STATE_FILE, JSON.stringify({
+        sessions: mem.sessions,
+        messages: mem.messages,
+        memories: mem.memories,
+        settings: mem.settings,
+        stickers: mem.stickers,
+        profile: mem.profile,
+        _id: mem._id
+      }));
+    } catch (e) { console.error('保存状态失败:', e.message); }
+  }, 250);
+}
+function saveState() { scheduleSave(); }
+function loadState() {
+  try {
+    if (fs.existsSync(STATE_FILE)) {
+      const raw = JSON.parse(fs.readFileSync(STATE_FILE, 'utf-8'));
+      mem.sessions = raw.sessions || [];
+      mem.messages = raw.messages || [];
+      mem.memories = raw.memories || [];
+      mem.settings = raw.settings || null;
+      mem.stickers = raw.stickers || [];
+      mem.profile = raw.profile || mem.profile;
+      mem._id = raw._id || 1;
+      console.log('已从本地文件恢复状态：', mem.messages.length, '条消息 /', mem.memories.length, '条记忆');
+    }
+  } catch (e) { console.error('加载状态失败:', e.message); }
+}
 
 // 生成被引用消息的可读预览（用于引用条显示）
 function quotedPreviewOf(m) {
@@ -71,14 +111,14 @@ function splitReplies(text) {
 }
 
 const defaultSettings = {
-  system_prompt: '你可以把回复分成多条消息发送（用空行分隔每条，像微信那样一段一段发；简单回复保持一条即可）。除非用户明确要求或需要表达强烈情绪，否则优先用文字回复，不要频繁使用语音。当你需要语音回复时，用 [voice]文字内容[/voice] 标记。回复带一点你自己的语气就好，但 emoji、颜文字、波浪号这类装饰性符号不要每句话都加、更不要刷屏。',
+  system_prompt: '',
   temperature: 0.7,
-  max_context_rounds: 20,
+  max_context_rounds: 30,
   compress_threshold: 4000,
-  compress_keep_rounds: 6,
+  compress_keep_rounds: 15,
   max_reply_tokens: 1024,
   auto_summarize: true,
-  auto_summarize_after: 10,
+  auto_summarize_after: 30,
   delete_after_summarize: false
 };
 
@@ -163,6 +203,7 @@ app.put('/sessions/:id', async (req, res) => {
     } else {
       const s = mem.sessions.find(s => s.id === id);
       if (s) { s.name = name; s.updated_at = new Date().toISOString(); }
+      saveState();
       res.json({ session: s });
     }
   } catch (err) { res.status(500).json({ error: err.message }); }
@@ -177,6 +218,7 @@ app.delete('/sessions/:id', async (req, res) => {
     } else {
       mem.sessions = mem.sessions.filter(s => s.id !== id);
       mem.messages = mem.messages.filter(m => m.session_id !== id);
+      saveState();
     }
     res.json({ success: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
@@ -207,6 +249,7 @@ app.put('/messages/:id', async (req, res) => {
     } else {
       const msg = mem.messages.find(m => m.id === id);
       if (msg) { msg.content = content; msg.edited = true; }
+      saveState();
       res.json({ message: msg });
     }
   } catch (err) { res.status(500).json({ error: err.message }); }
@@ -217,6 +260,7 @@ app.delete('/messages/:id', async (req, res) => {
     const { id } = req.params;
     if (useSupabase) { await supabase.from('messages').delete().eq('id', id); }
     else { mem.messages = mem.messages.filter(m => m.id !== id); }
+    saveState();
     res.json({ success: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -303,6 +347,7 @@ app.put('/memories/:id', async (req, res) => {
     } else {
       const m = mem.memories.find(m => m.id === id);
       if (m) Object.assign(m, updates);
+      saveState();
       res.json({ success: true, data: m });
     }
   } catch (err) { res.status(500).json({ success: false, error: err.message }); }
@@ -312,7 +357,8 @@ app.delete('/memories/:id', async (req, res) => {
   try {
     const { id } = req.params;
     if (useSupabase) { await supabase.from('memories').delete().eq('id', id); }
-    else { mem.memories = mem.memories.filter(m => m.id !== id); }
+      else { mem.memories = mem.memories.filter(m => m.id !== id); }
+      saveState();
     res.json({ success: true });
   } catch (err) { res.status(500).json({ success: false, error: err.message }); }
 });
@@ -354,6 +400,7 @@ app.post('/memories/compress/:sessionId', async (req, res) => {
       const ids = new Set(allMessages.map(m => m.id));
       if (delete_after) { mem.messages = mem.messages.filter(m => !ids.has(m.id)); }
       else { mem.messages.forEach(m => { if (ids.has(m.id)) m.summarized = true; }); }
+      saveState();
       res.json({ success: true, data: memory, message_count: allMessages.length, deleted: delete_after });
     }
   } catch (err) { res.status(500).json({ success: false, error: err.message }); }
@@ -495,8 +542,9 @@ app.get('/profile', (req, res) => {
 });
 
 app.put('/profile', (req, res) => {
-  mem.profile = { ...mem.profile, ...req.body };
-  res.json({ success: true, data: mem.profile });
+      mem.profile = { ...mem.profile, ...req.body };
+      saveState();
+      res.json({ success: true, data: mem.profile });
 });
 
 // ===== 表情包 =====
@@ -514,8 +562,9 @@ app.post('/stickers', (req, res) => {
 
 app.delete('/stickers/:id', (req, res) => {
   const { id } = req.params;
-  mem.stickers = mem.stickers.filter(s => s.id !== id);
-  res.json({ success: true });
+      mem.stickers = mem.stickers.filter(s => s.id !== id);
+      saveState();
+      res.json({ success: true });
 });
 
 // ===== 设置 =====
@@ -550,6 +599,7 @@ app.put('/settings', (req, res) => {
       });
     } else {
       mem.settings = { ...(mem.settings || defaultSettings), ...updates };
+      saveState();
       res.json({ settings: mem.settings });
     }
   } catch (err) { res.status(500).json({ error: err.message }); }
@@ -563,6 +613,7 @@ app.post('/chat', async (req, res) => {
 
   try {
     const now = new Date();
+    const resolvedModel = (model === 'deepseek') ? 'deepseek-chat' : (api_model || '[特价MAX-CC]claude-sonnet-5');
     let settings = { ...defaultSettings };
     if (mem.settings) settings = mem.settings;
 
@@ -596,13 +647,13 @@ app.post('/chat', async (req, res) => {
       if (m.images && m.images.length > 0) {
         content = content + (content ? '\n' : '') + `[用户发送了${m.images.length}张图片]`;
       }
-      return { role: m.role, content };
+      return { role: m.role, content, id: m.id };
     });
     const maxRounds = settings.max_context_rounds * 2;
     const recentHistory = history.slice(-maxRounds);
 
-    // 极简提示词 — 保留模型原生特性，只加功能指令
-    let sysContent = settings.system_prompt || '你可以把回复分成多条消息发送（用空行分隔每条，像微信那样一段一段发；简单回复保持一条即可）。除非用户明确要求或需要表达强烈情绪，否则优先用文字回复，不要频繁使用语音。当你需要语音回复时，用 [voice]文字内容[/voice] 标记。回复带一点你自己的语气就好，但 emoji、颜文字、波浪号这类装饰性符号不要每句话都加、更不要刷屏。';
+    // 极简提示词：只加功能指令 + 明确 AI 身份与模型，不堆砌人格/名字等冗余描述
+    let sysContent = '你是一个AI助手（基于 ' + resolvedModel + ' 模型运行，你清楚自己是一个AI、也知道所用模型）。\n\n' + (settings.system_prompt || '你可以用多条消息分段回复（用空行分隔每条，像微信那样；简单回复保持一条即可）。除非用户明确要求或需要表达强烈情绪，否则优先用文字回复，不要频繁使用语音；需要语音时用 [voice]文字内容[/voice] 标记。回复可以带一点自己的语气，但 emoji、颜文字、波浪号这类装饰性符号不要每句话都加、更不要刷屏。');
     if (memoryContext) sysContent += memoryContext;
 
     // 条件注入简介：只有填写了才给 AI 读
@@ -674,11 +725,14 @@ app.post('/chat', async (req, res) => {
       let part = replies[i];
 
       // 解析 AI 的引用标记
-      let replyRole = null, replyContent = null;
+      let replyRole = null, replyContent = null, replyQuoteMsgId = null;
       const quoteMatch = part.match(/\[quote\]([\s\S]*?)\[\/quote\]/);
       if (quoteMatch) {
         replyContent = quoteMatch[1].trim();
         replyRole = 'user';
+        // 反查被引用的原消息 id（供前端隐藏其时间戳）
+        const qm = history.find(h => h.role === 'user' && (h.content || '').includes(replyContent));
+        replyQuoteMsgId = qm ? qm.id : null;
         part = part.replace(/\[quote\][\s\S]*?\[\/quote\]/, '').trim();
       }
 
@@ -696,14 +750,16 @@ app.post('/chat', async (req, res) => {
         }
 
         const msgContent = voiceData.audio ? remainingContent : '';
-        mem.messages.push({ id: nextId(), session_id, role: 'assistant', content: msgContent, voice: voiceData, reply_role: replyRole, reply_content: replyContent, visible: true, created_at: replyTime, summarized: false });
+        mem.messages.push({ id: nextId(), session_id, role: 'assistant', content: msgContent, voice: voiceData, reply_role: replyRole, reply_content: replyContent, reply_to: replyQuoteMsgId, visible: true, created_at: replyTime, summarized: false });
         const replyObj = { content: msgContent, created_at: replyTime, voice: voiceData };
         if (replyRole) { replyObj.reply_role = replyRole; replyObj.reply_content = replyContent; }
+        if (replyQuoteMsgId) replyObj.reply_to = replyQuoteMsgId;
         savedReplies.push(replyObj);
       } else {
-        mem.messages.push({ id: nextId(), session_id, role: 'assistant', content: part, reply_role: replyRole, reply_content: replyContent, visible: true, created_at: replyTime, summarized: false });
+        mem.messages.push({ id: nextId(), session_id, role: 'assistant', content: part, reply_role: replyRole, reply_content: replyContent, reply_to: replyQuoteMsgId, visible: true, created_at: replyTime, summarized: false });
         const replyObj = { content: part, created_at: replyTime };
         if (replyRole) { replyObj.reply_role = replyRole; replyObj.reply_content = replyContent; }
+        if (replyQuoteMsgId) replyObj.reply_to = replyQuoteMsgId;
         savedReplies.push(replyObj);
       }
     }
@@ -870,10 +926,13 @@ async function autoCompress(sessionId, settings) {
     const ids = new Set(toCompress.map(m => m.id));
     if (settings.delete_after_summarize) { mem.messages = mem.messages.filter(m => !ids.has(m.id)); }
     else { mem.messages.forEach(m => { if (ids.has(m.id)) m.summarized = true; }); }
+    saveState();
     console.log(`自动总结完成，处理了 ${toCompress.length} 条消息`);
   } catch (err) { console.error('自动总结出错:', err); }
 }
 
+loadState();
+
 app.listen(port, () => {
-  console.log(`🐠 裴拟的海洋馆后端运行在端口 ${port}（${useSupabase ? 'Supabase' : '内存模式'}）`);
+  console.log(`🐠 裴拟的海洋馆后端运行在端口 ${port}（${useSupabase ? 'Supabase' : '文件持久化模式'}）`);
 });
