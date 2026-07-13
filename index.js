@@ -27,6 +27,15 @@ const mem = {
 };
 function nextId() { return String(mem._id++); }
 
+// 生成被引用消息的可读预览（用于引用条显示）
+function quotedPreviewOf(m) {
+  if (!m) return '';
+  if (m.voice) return '[语音消息]';
+  if (m.images && m.images.length > 0) return `[图片×${m.images.length}]`;
+  if (m.content && m.content.includes('[贴纸]')) return '[贴纸]';
+  return (m.content || '').trim();
+}
+
 const defaultSettings = {
   system_prompt: '你可以把回复分成多条消息发送（用空行分隔每条，简单回复保持一条即可）。当你想用语音回复时，用 [voice]文字内容[/voice] 标记。',
   temperature: 0.7,
@@ -519,21 +528,32 @@ app.post('/chat', async (req, res) => {
   if (!session_id) return res.status(400).json({ error: '缺少 session_id' });
 
   try {
-    const now = new Date().toISOString();
+    const now = new Date();
     let settings = { ...defaultSettings };
     if (mem.settings) settings = mem.settings;
 
-    // 保存用户消息（含图片）
-    const userMsg = { id: nextId(), session_id, role: 'user', content: message || '', images: images || [], visible: true, created_at: now, reply_to: reply_to || null, summarized: false };
+    // 引用消息查找（让 AI 真正"看到"被引用的内容）
+    const quotedMsg = reply_to ? mem.messages.find(m => String(m.id) === String(reply_to)) : null;
+    const quotedPreview = quotedMsg ? quotedPreviewOf(quotedMsg) : null;
+
+    // 保存用户消息（含图片 + 引用信息）
+    const userMsg = {
+      id: nextId(), session_id, role: 'user', content: message || '',
+      images: images || [], visible: true, created_at: now.toISOString(),
+      reply_to: reply_to || null,
+      reply_role: quotedMsg ? quotedMsg.role : null,
+      reply_content: quotedPreview,
+      summarized: false
+    };
     mem.messages.push(userMsg);
     const s = mem.sessions.find(s => s.id === session_id);
-    if (s) s.updated_at = now;
+    if (s) s.updated_at = now.toISOString();
 
     // 加载记忆
     let memoryContext = '';
     if (mem.memories.length > 0) {
       const recent = [...mem.memories].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp)).slice(0, 5);
-      memoryContext = '\n\n【记忆宫殿摘要】\n' + recent.map(m => m.summary).join('\n') + '\n';
+      memoryContext = '\n\n【记忆宫殿摘要】以下是你记得的重要信息：\n' + recent.map(m => '• ' + (m.summary || '')).join('\n') + '\n';
     }
 
     // 加载历史（文本 + 图片标记）
@@ -559,6 +579,14 @@ app.post('/chat', async (req, res) => {
       sysContent += `\n\n【AI简介】${mem.profile.aiName || '裴拟'}：${mem.profile.aiBio.trim()}`;
     }
 
+    // 时间感知（北京时间 + 周几）
+    const timeStr = now.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
+    const weekday = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'][now.getDay()];
+    sysContent += `\n\n【当前时间】现在是 ${timeStr}（北京时间，${weekday}）`;
+
+    // 引用功能说明（让 AI 知道可以引用 + 会被告知用户引用了什么）
+    sysContent += '\n\n【引用功能】当用户引用了某条消息，你会在用户消息开头看到「引用了XX的消息：...」。你也可以引用用户之前说的话来回应，写法是用 [quote]你要引用的内容[/quote] 包裹，被引用的内容会显示在你消息气泡的上方。';
+
     const contextMessages = [{ role: 'system', content: sysContent.trim() }, ...recentHistory];
 
     // 如果当前消息有图片，用多模态格式替换最后一条用户消息
@@ -570,6 +598,19 @@ app.post('/chat', async (req, res) => {
         if (message) parts.push({ type: 'text', text: message });
         images.forEach(img => parts.push({ type: 'image_url', image_url: { url: img } }));
         contextMessages[lastIdx] = { role: 'user', content: parts };
+      }
+    }
+
+    // 把用户引用的消息内容注入到上下文，确保 AI 真正"看到"
+    if (quotedMsg) {
+      const roleName = quotedMsg.role === 'user' ? (mem.profile.userName || '用户') : (mem.profile.aiName || '裴拟');
+      for (let i = contextMessages.length - 1; i >= 0; i--) {
+        if (contextMessages[i].role === 'user') {
+          const quoteText = quotedPreviewOf(quotedMsg);
+          const base = (typeof contextMessages[i].content === 'string') ? contextMessages[i].content : (message || '');
+          contextMessages[i] = { role: 'user', content: `(引用了「${roleName}」的消息：「${quoteText}」)\n\n${base}` };
+          break;
+        }
       }
     }
 
@@ -594,32 +635,44 @@ app.post('/chat', async (req, res) => {
       if (replies.length === 0) replies = [aiResponse];
     }
 
-    // 保存每条 AI 回复（检测 [voice] 标记）
+    // 保存每条 AI 回复（检测 [voice] 语音标记 与 [quote] 引用标记）
     const savedReplies = [];
     for (let i = 0; i < replies.length; i++) {
       const replyTime = new Date().toISOString();
-      const voiceMatch = replies[i].match(/\[voice\]([\s\S]*?)\[\/voice\]/);
+      let part = replies[i];
 
+      // 解析 AI 的引用标记
+      let replyRole = null, replyContent = null;
+      const quoteMatch = part.match(/\[quote\]([\s\S]*?)\[\/quote\]/);
+      if (quoteMatch) {
+        replyContent = quoteMatch[1].trim();
+        replyRole = 'user';
+        part = part.replace(/\[quote\][\s\S]*?\[\/quote\]/, '').trim();
+      }
+
+      const voiceMatch = part.match(/\[voice\]([\s\S]*?)\[\/voice\]/);
       if (voiceMatch) {
         const voiceText = voiceMatch[1].trim();
-        const remainingContent = replies[i].replace(/\[voice\][\s\S]*?\[\/voice\]/, '').trim();
+        const remainingContent = part.replace(/\[voice\][\s\S]*?\[\/voice\]/, '').trim();
 
-        let voiceData = null;
+        // 始终生成语音对象（无 key 时 audio 为 null，前端仍显示语音条+文字）
+        const voiceData = { text: voiceText, duration: Math.max(1, Math.ceil(voiceText.length / 4)) };
         if (tts_config && tts_config.apiKey) {
           try {
-            const audioBase64 = await generateTTS(voiceText, tts_config);
-            voiceData = { audio: audioBase64, text: voiceText, duration: Math.max(1, Math.ceil(voiceText.length / 4)) };
+            voiceData.audio = await generateTTS(voiceText, tts_config);
           } catch (err) { console.error('TTS失败:', err.message); }
         }
 
-        const msgContent = voiceData ? remainingContent : voiceText;
-        mem.messages.push({ id: nextId(), session_id, role: 'assistant', content: msgContent, voice: voiceData, visible: true, created_at: replyTime, summarized: false });
-        const replyObj = { content: msgContent, created_at: replyTime };
-        if (voiceData) replyObj.voice = voiceData;
+        const msgContent = voiceData.audio ? remainingContent : '';
+        mem.messages.push({ id: nextId(), session_id, role: 'assistant', content: msgContent, voice: voiceData, reply_role: replyRole, reply_content: replyContent, visible: true, created_at: replyTime, summarized: false });
+        const replyObj = { content: msgContent, created_at: replyTime, voice: voiceData };
+        if (replyRole) { replyObj.reply_role = replyRole; replyObj.reply_content = replyContent; }
         savedReplies.push(replyObj);
       } else {
-        mem.messages.push({ id: nextId(), session_id, role: 'assistant', content: replies[i], visible: true, created_at: replyTime, summarized: false });
-        savedReplies.push({ content: replies[i], created_at: replyTime });
+        mem.messages.push({ id: nextId(), session_id, role: 'assistant', content: part, reply_role: replyRole, reply_content: replyContent, visible: true, created_at: replyTime, summarized: false });
+        const replyObj = { content: part, created_at: replyTime };
+        if (replyRole) { replyObj.reply_role = replyRole; replyObj.reply_content = replyContent; }
+        savedReplies.push(replyObj);
       }
     }
 
