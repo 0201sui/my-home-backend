@@ -36,8 +36,42 @@ function quotedPreviewOf(m) {
   return (m.content || '').trim();
 }
 
+// 智能分条：优先按空行分；长文无空行时按单换行分（合并过短续行）；超长无换行时按标点切成多段
+function splitReplies(text) {
+  const t = (text || '').trim();
+  if (!t) return [''];
+  // 1) 显式空行分隔：永远分条（AI 明确想分多条消息）
+  let parts = t.split(/\n\n+/).map(p => p.trim()).filter(Boolean);
+  if (parts.length > 1) return parts;
+  // 2) 单换行 + 较长：按单换行分，合并过短续行
+  if (t.includes('\n') && t.length >= 40) {
+    const s = t.split(/\n+/).map(p => p.trim()).filter(Boolean);
+    parts = [];
+    for (const p of s) {
+      if (parts.length && p.length < 14) parts[parts.length - 1] += '\n' + p;
+      else parts.push(p);
+    }
+    if (parts.length > 1) return parts;
+  }
+  // 3) 没有换行但很长：按句号/问号/感叹号切成多段（避免一整坨；含语音/引用标记则不切，防止打断标记）
+  if (!t.includes('\n') && t.length >= 120 && !t.includes('[voice]') && !t.includes('[quote]')) {
+    const sentences = t.split(/(?<=[。！？!?])/).map(p => p.trim()).filter(Boolean);
+    if (sentences.length > 1) {
+      parts = [];
+      let buf = '';
+      for (const s of sentences) {
+        if (buf && (buf.length + s.length) > 80) { parts.push(buf); buf = ''; }
+        buf += s;
+      }
+      if (buf) parts.push(buf);
+      if (parts.length > 1) return parts;
+    }
+  }
+  return [t];
+}
+
 const defaultSettings = {
-  system_prompt: '你可以把回复分成多条消息发送（用空行分隔每条，简单回复保持一条即可）。除非用户明确要求或需要表达强烈情绪，否则优先用文字回复，不要频繁使用语音。当你需要语音回复时，用 [voice]文字内容[/voice] 标记。请避免过度使用 emoji、波浪号、颜文字或贴纸，保持自然、克制的表达。',
+  system_prompt: '你可以把回复分成多条消息发送（用空行分隔每条，像微信那样一段一段发；简单回复保持一条即可）。除非用户明确要求或需要表达强烈情绪，否则优先用文字回复，不要频繁使用语音。当你需要语音回复时，用 [voice]文字内容[/voice] 标记。回复带一点你自己的语气就好，但 emoji、颜文字、波浪号这类装饰性符号不要每句话都加、更不要刷屏。',
   temperature: 0.7,
   max_context_rounds: 20,
   compress_threshold: 4000,
@@ -568,7 +602,7 @@ app.post('/chat', async (req, res) => {
     const recentHistory = history.slice(-maxRounds);
 
     // 极简提示词 — 保留模型原生特性，只加功能指令
-    let sysContent = settings.system_prompt || '你可以把回复分成多条消息发送（用空行分隔每条，简单回复保持一条即可）。除非用户明确要求或需要表达强烈情绪，否则优先用文字回复，不要频繁使用语音。当你需要语音回复时，用 [voice]文字内容[/voice] 标记。请避免过度使用 emoji、波浪号、颜文字或贴纸，保持自然、克制的表达。';
+    let sysContent = settings.system_prompt || '你可以把回复分成多条消息发送（用空行分隔每条，像微信那样一段一段发；简单回复保持一条即可）。除非用户明确要求或需要表达强烈情绪，否则优先用文字回复，不要频繁使用语音。当你需要语音回复时，用 [voice]文字内容[/voice] 标记。回复带一点你自己的语气就好，但 emoji、颜文字、波浪号这类装饰性符号不要每句话都加、更不要刷屏。';
     if (memoryContext) sysContent += memoryContext;
 
     // 条件注入简介：只有填写了才给 AI 读
@@ -579,17 +613,22 @@ app.post('/chat', async (req, res) => {
       sysContent += `\n\n【AI简介】${mem.profile.aiName || '裴拟'}：${mem.profile.aiBio.trim()}`;
     }
 
-    // 时间感知（自然语言，AI 内心知晓，不向用户复读系统时间）
-    const y = now.getFullYear();
-    const mo = now.getMonth() + 1;
-    const d = now.getDate();
-    const weekday = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'][now.getDay()];
-    const hh = now.getHours();
-    const mm = String(now.getMinutes()).padStart(2, '0');
+    // 时间感知（始终按北京时间 Asia/Shanghai 计算，不受服务器时区影响；AI 内心知晓，不向用户复读）
+    const shParts = new Intl.DateTimeFormat('zh-CN', {
+      timeZone: 'Asia/Shanghai',
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      weekday: 'long', hour: '2-digit', minute: '2-digit', hour12: false
+    }).formatToParts(now).reduce((acc, p) => { acc[p.type] = p.value; return acc; }, {});
+    const yy = shParts.year;
+    const mo = shParts.month;
+    const dd = shParts.day;
+    const weekdayCN = '周' + shParts.weekday.replace('星期', '');
+    const hh = parseInt(shParts.hour, 10);
+    const mm = shParts.minute;
     const period = hh < 6 ? '凌晨' : hh < 12 ? '上午' : hh < 14 ? '中午' : hh < 18 ? '下午' : '晚上';
     const hour12 = hh % 12 === 0 ? 12 : hh % 12;
-    const naturalTime = `${y}年${mo}月${d}日 ${weekday} ${period}${hour12}点${mm}分`;
-    sysContent += `\n\n【当前时间】当前是 ${naturalTime}（你内心知晓即可，不要用这段系统信息直接回复用户）。用户问时间时，用日常口吻简短回答，例如“现在快七点半啦”，不要出现“北京时间”“系统时间”这类字眼，也不要整段复述日期时间。`;
+    const naturalTime = `${yy}年${mo}月${dd}日 ${weekdayCN} ${period}${hour12}点${mm}分`;
+    sysContent += `\n\n【当前时间】现在是 ${naturalTime}（这是北京时间，你内心知晓即可，不要用这段系统信息直接回复用户）。用户问时间时，用日常口吻简短回答，例如“现在快七点半啦”，不要出现“北京时间”“系统时间”这类字眼，也不要整段复述日期时间。`;
 
     // 引用功能说明（让 AI 知道可以引用 + 会被告知用户引用了什么）
     sysContent += '\n\n【引用功能】当用户引用了某条消息，你会在用户消息开头看到「引用了XX的消息：...」，请据此回应。你也可以主动引用用户之前说的话来回应：用 [quote]你要引用的用户原话[/quote] 包裹，被引用的内容会显示在你消息气泡的上方（像微信那样）。在合适的时候（如回应用户的具体问题、延续对方的话题）使用引用会更自然贴心。';
@@ -625,22 +664,8 @@ app.post('/chat', async (req, res) => {
     const customConfig = (api_url && api_key) ? { api_url, api_key, api_model } : null;
     const aiResponse = await callModel(contextMessages, model, settings, customConfig);
 
-    // 智能分条：AI 用空行分隔；过短则不强制分条，过短片段合并到上一条
-    let replies;
-    if (aiResponse.length < 100) {
-      replies = [aiResponse];
-    } else {
-      const parts = aiResponse.split(/\n\n+/).map(p => p.trim()).filter(Boolean);
-      replies = [];
-      for (const part of parts) {
-        if (replies.length > 0 && part.length < 25) {
-          replies[replies.length - 1] += '\n\n' + part;
-        } else {
-          replies.push(part);
-        }
-      }
-      if (replies.length === 0) replies = [aiResponse];
-    }
+    // 智能分条：AI 用空行分隔；长文无空行时按单换行分条（合并过短续行）
+    const replies = splitReplies(aiResponse);
 
     // 保存每条 AI 回复（检测 [voice] 语音标记 与 [quote] 引用标记）
     const savedReplies = [];
