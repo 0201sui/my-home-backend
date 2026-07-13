@@ -37,7 +37,7 @@ function quotedPreviewOf(m) {
 }
 
 const defaultSettings = {
-  system_prompt: '你可以把回复分成多条消息发送（用空行分隔每条，简单回复保持一条即可）。当你想用语音回复时，用 [voice]文字内容[/voice] 标记。',
+  system_prompt: '你可以把回复分成多条消息发送（用空行分隔每条，简单回复保持一条即可）。当你想用语音回复时，用 [voice]文字内容[/voice] 标记。请避免过度使用 emoji、波浪号、颜文字或贴纸，保持自然、克制的表达。',
   temperature: 0.7,
   max_context_rounds: 20,
   compress_threshold: 4000,
@@ -568,7 +568,7 @@ app.post('/chat', async (req, res) => {
     const recentHistory = history.slice(-maxRounds);
 
     // 极简提示词 — 保留模型原生特性，只加功能指令
-    let sysContent = settings.system_prompt || '你可以把回复分成多条消息发送（用空行分隔每条，简单回复保持一条即可）。当你想用语音回复时，用 [voice]文字内容[/voice] 标记。';
+    let sysContent = settings.system_prompt || '你可以把回复分成多条消息发送（用空行分隔每条，简单回复保持一条即可）。当你想用语音回复时，用 [voice]文字内容[/voice] 标记。请避免过度使用 emoji、波浪号、颜文字或贴纸，保持自然、克制的表达。';
     if (memoryContext) sysContent += memoryContext;
 
     // 条件注入简介：只有填写了才给 AI 读
