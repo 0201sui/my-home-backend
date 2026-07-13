@@ -28,7 +28,7 @@ const mem = {
 function nextId() { return String(mem._id++); }
 
 const defaultSettings = {
-  system_prompt: '你可以把回复分成多条消息发送（用空行分隔每条）。当你想用语音回复时，用 [voice]文字内容[/voice] 标记。',
+  system_prompt: '你可以把回复分成多条消息发送（用空行分隔每条，简单回复保持一条即可）。当你想用语音回复时，用 [voice]文字内容[/voice] 标记。',
   temperature: 0.7,
   max_context_rounds: 20,
   compress_threshold: 4000,
@@ -548,8 +548,16 @@ app.post('/chat', async (req, res) => {
     const recentHistory = history.slice(-maxRounds);
 
     // 极简提示词 — 保留模型原生特性，只加功能指令
-    let sysContent = settings.system_prompt || '你可以把回复分成多条消息发送（用空行分隔每条）。当你想用语音回复时，用 [voice]文字内容[/voice] 标记。';
+    let sysContent = settings.system_prompt || '你可以把回复分成多条消息发送（用空行分隔每条，简单回复保持一条即可）。当你想用语音回复时，用 [voice]文字内容[/voice] 标记。';
     if (memoryContext) sysContent += memoryContext;
+
+    // 条件注入简介：只有填写了才给 AI 读
+    if (mem.profile.userBio && mem.profile.userBio.trim()) {
+      sysContent += `\n\n【用户简介】${mem.profile.userName || '用户'}：${mem.profile.userBio.trim()}`;
+    }
+    if (mem.profile.aiBio && mem.profile.aiBio.trim()) {
+      sysContent += `\n\n【AI简介】${mem.profile.aiName || '裴拟'}：${mem.profile.aiBio.trim()}`;
+    }
 
     const contextMessages = [{ role: 'system', content: sysContent.trim() }, ...recentHistory];
 
@@ -569,9 +577,22 @@ app.post('/chat', async (req, res) => {
     const customConfig = (api_url && api_key) ? { api_url, api_key, api_model } : null;
     const aiResponse = await callModel(contextMessages, model, settings, customConfig);
 
-    // 分条：按双换行拆分 AI 回复
-    const parts = aiResponse.split(/\n\n+/).map(p => p.trim()).filter(Boolean);
-    const replies = parts.length > 0 ? parts : [aiResponse];
+    // 智能分条：AI 用空行分隔；过短则不强制分条，过短片段合并到上一条
+    let replies;
+    if (aiResponse.length < 100) {
+      replies = [aiResponse];
+    } else {
+      const parts = aiResponse.split(/\n\n+/).map(p => p.trim()).filter(Boolean);
+      replies = [];
+      for (const part of parts) {
+        if (replies.length > 0 && part.length < 25) {
+          replies[replies.length - 1] += '\n\n' + part;
+        } else {
+          replies.push(part);
+        }
+      }
+      if (replies.length === 0) replies = [aiResponse];
+    }
 
     // 保存每条 AI 回复（检测 [voice] 标记）
     const savedReplies = [];
@@ -619,11 +640,19 @@ app.post('/chat', async (req, res) => {
 
 // ===== TTS 语音合成（MiniMax）=====
 app.post('/tts', async (req, res) => {
-  const { text, api_key, voice_id, speed, model: ttsModel } = req.body;
+  const { text, api_key, voice_id, group_id, speed, model: ttsModel } = req.body;
   if (!text) return res.status(400).json({ error: '文本不能为空' });
   if (!api_key) return res.status(400).json({ error: '需要 MiniMax API Key' });
 
   try {
+    const voiceSetting = {
+      voice_id: voice_id || 'male-qn-qingse',
+      speed: parseFloat(speed) || 1.0,
+      vol: 1.0,
+      pitch: 0
+    };
+    if (group_id && String(group_id).trim()) voiceSetting.group_id = String(group_id).trim();
+
     const resp = await fetch('https://api.minimax.chat/v1/t2a_v2', {
       method: 'POST',
       headers: { 'Authorization': `Bearer ${api_key}`, 'Content-Type': 'application/json' },
@@ -631,12 +660,7 @@ app.post('/tts', async (req, res) => {
         model: ttsModel || 'speech-02-hd',
         text,
         stream: false,
-        voice_setting: {
-          voice_id: voice_id || 'male-qn-qingse',
-          speed: parseFloat(speed) || 1.0,
-          vol: 1.0,
-          pitch: 0
-        },
+        voice_setting: voiceSetting,
         audio_setting: { sample_rate: 32000, bit_rate: 128000, format: 'mp3', channel: 1 }
       })
     });
@@ -656,13 +680,23 @@ app.post('/tts', async (req, res) => {
 
 // ===== TTS 语音合成辅助函数 =====
 async function generateTTS(text, ttsConfig) {
+  const voiceSetting = {
+    voice_id: ttsConfig.voiceId || ttsConfig.customVoiceId || 'male-qn-qingse',
+    speed: parseFloat(ttsConfig.speed) || 1.0,
+    vol: 1.0,
+    pitch: 0
+  };
+  if (ttsConfig.groupId && String(ttsConfig.groupId).trim()) {
+    voiceSetting.group_id = String(ttsConfig.groupId).trim();
+  }
+
   const resp = await fetch('https://api.minimax.chat/v1/t2a_v2', {
     method: 'POST',
     headers: { 'Authorization': `Bearer ${ttsConfig.apiKey}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({
       model: ttsConfig.model || 'speech-02-hd',
       text, stream: false,
-      voice_setting: { voice_id: ttsConfig.voiceId || 'male-qn-qingse', speed: parseFloat(ttsConfig.speed) || 1.0, vol: 1.0, pitch: 0 },
+      voice_setting: voiceSetting,
       audio_setting: { sample_rate: 32000, bit_rate: 128000, format: 'mp3', channel: 1 }
     })
   });
