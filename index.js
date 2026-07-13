@@ -22,13 +22,13 @@ const mem = {
   memories: [],
   settings: null,
   stickers: [],
-  profile: { userBio: '', aiBio: '', userName: '我', aiName: '鱼说' },
+  profile: { userBio: '', aiBio: '', userName: '我', aiName: '裴拟' },
   _id: 1
 };
 function nextId() { return String(mem._id++); }
 
 const defaultSettings = {
-  system_prompt: '你是「鱼说」，一个温暖、有爱的AI伙伴。你住在一片虚拟的海洋里，陪伴用户聊天、思考和生活。请用温柔但自然的语气回复，像一个真正的朋友。',
+  system_prompt: '你可以把回复分成多条消息发送（用空行分隔每条）。当你想用语音回复时，用 [voice]文字内容[/voice] 标记。',
   temperature: 0.7,
   max_context_rounds: 20,
   compress_threshold: 4000,
@@ -41,7 +41,7 @@ const defaultSettings = {
 
 // ===== 健康检查 =====
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', message: '鱼说后端正常运行', storage: useSupabase ? 'supabase' : 'memory' });
+  res.json({ status: 'ok', message: '裴拟的海洋馆后端正常运行', storage: useSupabase ? 'supabase' : 'memory' });
 });
 
 // ===== API 代理（给 ApiConfig.jsx 用）=====
@@ -514,8 +514,8 @@ app.put('/settings', (req, res) => {
 
 // ===== 核心对话 =====
 app.post('/chat', async (req, res) => {
-  const { message, session_id, model, reply_to, stickers, api_url, api_key, api_model } = req.body;
-  if (!message) return res.status(400).json({ error: '消息不能为空' });
+  const { message, session_id, model, reply_to, stickers, api_url, api_key, api_model, images, tts_config } = req.body;
+  if (!message && (!images || images.length === 0)) return res.status(400).json({ error: '消息不能为空' });
   if (!session_id) return res.status(400).json({ error: '缺少 session_id' });
 
   try {
@@ -523,8 +523,8 @@ app.post('/chat', async (req, res) => {
     let settings = { ...defaultSettings };
     if (mem.settings) settings = mem.settings;
 
-    // 保存用户消息
-    const userMsg = { id: nextId(), session_id, role: 'user', content: message, visible: true, created_at: now, reply_to: reply_to || null, summarized: false };
+    // 保存用户消息（含图片）
+    const userMsg = { id: nextId(), session_id, role: 'user', content: message || '', images: images || [], visible: true, created_at: now, reply_to: reply_to || null, summarized: false };
     mem.messages.push(userMsg);
     const s = mem.sessions.find(s => s.id === session_id);
     if (s) s.updated_at = now;
@@ -536,27 +536,71 @@ app.post('/chat', async (req, res) => {
       memoryContext = '\n\n【记忆宫殿摘要】\n' + recent.map(m => m.summary).join('\n') + '\n';
     }
 
-    // 加载历史
-    const history = mem.messages.filter(m => m.session_id === session_id && m.visible).sort((a, b) => new Date(a.created_at) - new Date(b.created_at)).map(m => ({ role: m.role, content: m.content }));
+    // 加载历史（文本 + 图片标记）
+    const history = mem.messages.filter(m => m.session_id === session_id && m.visible).sort((a, b) => new Date(a.created_at) - new Date(b.created_at)).map(m => {
+      let content = m.content || '';
+      if (m.images && m.images.length > 0) {
+        content = content + (content ? '\n' : '') + `[用户发送了${m.images.length}张图片]`;
+      }
+      return { role: m.role, content };
+    });
     const maxRounds = settings.max_context_rounds * 2;
     const recentHistory = history.slice(-maxRounds);
 
-    // 时间感知 + 简介
-    const timeStr = new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
-    let sysContent = settings.system_prompt || '';
-    sysContent += `\n\n【当前时间】${timeStr}（北京时间）`;
-    sysContent += `\n\n【用户简介】${mem.profile.userName}：${mem.profile.userBio || '暂无'}`;
-    sysContent += `\n【你的简介】${mem.profile.aiName}：${mem.profile.aiBio || '暂无'}`;
-    sysContent += memoryContext;
+    // 极简提示词 — 保留模型原生特性，只加功能指令
+    let sysContent = settings.system_prompt || '你可以把回复分成多条消息发送（用空行分隔每条）。当你想用语音回复时，用 [voice]文字内容[/voice] 标记。';
+    if (memoryContext) sysContent += memoryContext;
 
     const contextMessages = [{ role: 'system', content: sysContent.trim() }, ...recentHistory];
+
+    // 如果当前消息有图片，用多模态格式替换最后一条用户消息
+    if (images && images.length > 0 && contextMessages.length > 0) {
+      const lastIdx = contextMessages.length - 1;
+      const lastMsg = contextMessages[lastIdx];
+      if (lastMsg && lastMsg.role === 'user') {
+        const parts = [];
+        if (message) parts.push({ type: 'text', text: message });
+        images.forEach(img => parts.push({ type: 'image_url', image_url: { url: img } }));
+        contextMessages[lastIdx] = { role: 'user', content: parts };
+      }
+    }
 
     // 调用模型
     const customConfig = (api_url && api_key) ? { api_url, api_key, api_model } : null;
     const aiResponse = await callModel(contextMessages, model, settings, customConfig);
 
-    // 保存 AI 回复
-    mem.messages.push({ id: nextId(), session_id, role: 'assistant', content: aiResponse, visible: true, created_at: new Date().toISOString(), summarized: false });
+    // 分条：按双换行拆分 AI 回复
+    const parts = aiResponse.split(/\n\n+/).map(p => p.trim()).filter(Boolean);
+    const replies = parts.length > 0 ? parts : [aiResponse];
+
+    // 保存每条 AI 回复（检测 [voice] 标记）
+    const savedReplies = [];
+    for (let i = 0; i < replies.length; i++) {
+      const replyTime = new Date().toISOString();
+      const voiceMatch = replies[i].match(/\[voice\]([\s\S]*?)\[\/voice\]/);
+
+      if (voiceMatch) {
+        const voiceText = voiceMatch[1].trim();
+        const remainingContent = replies[i].replace(/\[voice\][\s\S]*?\[\/voice\]/, '').trim();
+
+        let voiceData = null;
+        if (tts_config && tts_config.apiKey) {
+          try {
+            const audioBase64 = await generateTTS(voiceText, tts_config);
+            voiceData = { audio: audioBase64, text: voiceText, duration: Math.max(1, Math.ceil(voiceText.length / 4)) };
+          } catch (err) { console.error('TTS失败:', err.message); }
+        }
+
+        const msgContent = voiceData ? remainingContent : voiceText;
+        mem.messages.push({ id: nextId(), session_id, role: 'assistant', content: msgContent, voice: voiceData, visible: true, created_at: replyTime, summarized: false });
+        const replyObj = { content: msgContent, created_at: replyTime };
+        if (voiceData) replyObj.voice = voiceData;
+        savedReplies.push(replyObj);
+      } else {
+        mem.messages.push({ id: nextId(), session_id, role: 'assistant', content: replies[i], visible: true, created_at: replyTime, summarized: false });
+        savedReplies.push({ content: replies[i], created_at: replyTime });
+      }
+    }
 
     // 自动总结
     if (settings.auto_summarize) {
@@ -566,12 +610,68 @@ app.post('/chat', async (req, res) => {
       }
     }
 
-    res.json({ reply: aiResponse });
+    res.json({ replies: savedReplies });
   } catch (error) {
     console.error('对话错误:', error);
     res.status(500).json({ error: error.message });
   }
 });
+
+// ===== TTS 语音合成（MiniMax）=====
+app.post('/tts', async (req, res) => {
+  const { text, api_key, voice_id, speed, model: ttsModel } = req.body;
+  if (!text) return res.status(400).json({ error: '文本不能为空' });
+  if (!api_key) return res.status(400).json({ error: '需要 MiniMax API Key' });
+
+  try {
+    const resp = await fetch('https://api.minimax.chat/v1/t2a_v2', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${api_key}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: ttsModel || 'speech-02-hd',
+        text,
+        stream: false,
+        voice_setting: {
+          voice_id: voice_id || 'male-qn-qingse',
+          speed: parseFloat(speed) || 1.0,
+          vol: 1.0,
+          pitch: 0
+        },
+        audio_setting: { sample_rate: 32000, bit_rate: 128000, format: 'mp3', channel: 1 }
+      })
+    });
+    const data = await resp.json();
+    if (!resp.ok) return res.status(500).json({ error: data.message || data.base_resp?.status_msg || 'TTS调用失败' });
+
+    const audioHex = data.data?.audio;
+    if (!audioHex) return res.status(500).json({ error: '未返回音频数据' });
+
+    const audioBuffer = Buffer.from(audioHex, 'hex');
+    res.set('Content-Type', 'audio/mp3');
+    res.send(audioBuffer);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ===== TTS 语音合成辅助函数 =====
+async function generateTTS(text, ttsConfig) {
+  const resp = await fetch('https://api.minimax.chat/v1/t2a_v2', {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${ttsConfig.apiKey}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: ttsConfig.model || 'speech-02-hd',
+      text, stream: false,
+      voice_setting: { voice_id: ttsConfig.voiceId || 'male-qn-qingse', speed: parseFloat(ttsConfig.speed) || 1.0, vol: 1.0, pitch: 0 },
+      audio_setting: { sample_rate: 32000, bit_rate: 128000, format: 'mp3', channel: 1 }
+    })
+  });
+  const data = await resp.json();
+  if (!resp.ok) throw new Error(data.message || data.base_resp?.status_msg || 'TTS调用失败');
+  const audioHex = data.data?.audio;
+  if (!audioHex) throw new Error('未返回音频数据');
+  return Buffer.from(audioHex, 'hex').toString('base64');
+}
 
 // ===== 模型调用 =====
 async function callModel(messages, modelName, settings, customConfig) {
@@ -656,5 +756,5 @@ async function autoCompress(sessionId, settings) {
 }
 
 app.listen(port, () => {
-  console.log(`🐟 鱼说后端运行在端口 ${port}（${useSupabase ? 'Supabase' : '内存模式'}）`);
+  console.log(`🐠 裴拟的海洋馆后端运行在端口 ${port}（${useSupabase ? 'Supabase' : '内存模式'}）`);
 });
