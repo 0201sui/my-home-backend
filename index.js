@@ -1792,8 +1792,25 @@ async function webSearch(query, city) {
 app.post('/search', async (req, res) => {
   const { query } = req.body;
   if (!query) return res.status(400).json({ error: '缺少搜索关键词' });
-  const results = await webSearch(query);
+  const results = await webSearch(query, req.body.search_city);
   res.json({ success: true, results });
+});
+
+// 临时诊断：查看 Render 出网到各数据源的原始返回（用完即删）
+app.get('/debug/net', async (req, res) => {
+  const out = {};
+  const probe = async (name, url, opts) => {
+    try {
+      const r = await fetch(url, opts);
+      const t = await r.text();
+      out[name] = { status: r.status, len: t.length, head: t.slice(0, 180) };
+    } catch (e) { out[name] = { error: e.message, cause: (e.cause && e.cause.code) || '' }; }
+  };
+  await probe('gd_search', 'https://music-api.gdstudio.xyz/api.php?types=search&source=netease&name=' + encodeURIComponent('晴天') + '&count=2&pages=1', { headers: { 'User-Agent': 'Mozilla/5.0', 'Referer': 'https://music.gdstudio.xyz/' } });
+  await probe('wttr', 'https://wttr.in/Shanghai?format=j1', { headers: { 'User-Agent': 'curl/8.0' } });
+  await probe('ddg', 'https://html.duckduckgo.com/html/?q=' + encodeURIComponent('test'), { headers: { 'User-Agent': 'Mozilla/5.0' } });
+  await probe('ddg_ia', 'https://api.duckduckgo.com/?q=test&format=json', {});
+  res.json(out);
 });
 
 // ===== 一起读功能 =====
