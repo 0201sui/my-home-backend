@@ -660,7 +660,7 @@ app.post('/chat', async (req, res) => {
     const recentHistory = history.slice(-maxRounds);
 
     // 精简系统提示词（与 buildChatContext 一致，控制长度避免 AI 失忆）
-    let sysContent = composeSystemPrompt(session_id, req.body.music_info, req.body.sticker_meanings || []);
+    let sysContent = composeSystemPrompt(session_id, req.body.music_info, req.body.sticker_meanings || [], req.body.pet_images);
 
     const contextMessages = [{ role: 'system', content: sysContent.trim() }, ...recentHistory];
 
@@ -914,10 +914,10 @@ try {
   FEATURES_MANIFEST = fs.readFileSync(path.join(__dirname, 'features.json'), 'utf-8');
 } catch (e) { FEATURES_MANIFEST = ''; }
 
-function composeSystemPrompt(session_id, music_info, stickerMeanings) {
+function composeSystemPrompt(session_id, music_info, stickerMeanings, petImages) {
   const now = new Date();
-  // 像朋友一样自然对话，不使用括号/引号/星号等符号，也不使用 markdown 格式符号
-  let sys = '你是AI助手，由Claude提供支持。像朋友一样自然地聊天，不要使用括号（）、引号""、方括号[]或星号*来表达动作或旁白，也不要用加粗/斜体/标题等格式符号，直接说就行。需要生成语音时用[voice]文字[/voice]包裹。';
+  // 像朋友一样自然对话，不使用括号/引号/星号/波浪号等符号，也不使用 markdown 格式符号
+  let sys = '你是AI助手，由Claude提供支持。像朋友一样自然地聊天。重要：不要使用任何符号来表达动作或旁白——不要括号（）、不要引号""「」『』、不要方括号[]、不要星号*、不要波浪号~、不要多余的特殊符号（正常的中文标点如逗号句号可以）。也不要用加粗/斜体/标题等 markdown 格式。直接用人话、自然地表达就行。需要生成语音时用[voice]文字[/voice]包裹（该标记不会显示给用户）。';
 
   // 用户画像（截断，控制长度）
   if (mem.profile?.profile_summary) {
@@ -939,10 +939,12 @@ function composeSystemPrompt(session_id, music_info, stickerMeanings) {
   if (mem.profile.aiName && mem.profile.aiName.trim()) {
     sys += `\n\n【你的名字】你现在的名字是「${mem.profile.aiName.trim()}」，请以此自称并让用户这样称呼你。`;
   }
-  // 桌宠图片库（让用户/AI 都能从中选择桌宠形象）
-  if (Array.isArray(mem.profile.petImages) && mem.profile.petImages.length > 0) {
-    const list = mem.profile.petImages.map((p, i) => `${i + 1}. ${p.name || ('图片' + (i + 1))}（id=${p.id}）`).join('\n');
-    sys += `\n\n【桌宠图片库】用户上传了以下桌宠形象，你可以选用：\n${list}\n想换桌宠时回 [act]pet:<对应的id>[/act]（例如 [act]pet:${mem.profile.petImages[0].id}[/act]）。`;
+  // 桌宠图片库（让用户/AI 都能从中选择桌宠形象；优先用前端随请求传入的最新列表，避免后端状态易失导致 AI 看不到新上传）
+  const petList = (Array.isArray(petImages) && petImages.length > 0) ? petImages
+    : (Array.isArray(mem.profile.petImages) ? mem.profile.petImages : []);
+  if (petList.length > 0) {
+    const list = petList.map((p, i) => `${i + 1}. ${p.name || ('图片' + (i + 1))}（id=${p.id}）`).join('\n');
+    sys += `\n\n【桌宠图片库】用户上传了以下桌宠形象（已自动抠去背景，无边框），你可以随时选用：\n${list}\n想换桌宠时回 [act]pet:<对应的id>[/act]（例如 [act]pet:${petList[0].id}[/act]）。`;
   }
   // 时间感知（北京时间）
   const shParts = new Intl.DateTimeFormat('zh-CN', {
@@ -1002,7 +1004,7 @@ function composeSystemPrompt(session_id, music_info, stickerMeanings) {
 }
 
 // ===== 构建对话上下文（复用逻辑）=====
-function buildChatContext({ message, session_id, model, reply_to, api_url, api_key, api_model, images, file_content, temperature, max_context_rounds, auto_summarize_after, compress_keep_rounds, max_reply_tokens, music_info, sticker_meanings }) {
+function buildChatContext({ message, session_id, model, reply_to, api_url, api_key, api_model, images, file_content, temperature, max_context_rounds, auto_summarize_after, compress_keep_rounds, max_reply_tokens, music_info, sticker_meanings, petImages }) {
   const now = new Date();
   const resolvedModel = (model === 'deepseek') ? 'deepseek-chat' : (api_model || '[特价MAX-CC]claude-sonnet-5');
   let settings = { ...defaultSettings };
@@ -1030,7 +1032,7 @@ function buildChatContext({ message, session_id, model, reply_to, api_url, api_k
   const maxRounds = 999999;
   const recentHistory = history.slice(-maxRounds);
 
-  let sysContent = composeSystemPrompt(session_id, music_info, sticker_meanings || []);
+  let sysContent = composeSystemPrompt(session_id, music_info, sticker_meanings || [], petImages);
 
   // 文件内容注入
   let fullMessage = message || '';
@@ -1298,7 +1300,8 @@ app.post('/chat/regenerate', async (req, res) => {
       compress_keep_rounds: req.body.compress_keep_rounds,
       max_reply_tokens: req.body.max_reply_tokens,
       music_info: req.body.music_info,
-      sticker_meanings: req.body.sticker_meanings
+      sticker_meanings: req.body.sticker_meanings,
+      petImages: req.body.pet_images
     });
 
     const customConfig = (api_url && api_key) ? { api_url, api_key, api_model } : null;
@@ -1446,7 +1449,8 @@ app.post('/chat/respond', async (req, res) => {
       compress_keep_rounds,
       max_reply_tokens,
       music_info: req.body.music_info,
-      sticker_meanings: req.body.sticker_meanings
+      sticker_meanings: req.body.sticker_meanings,
+      petImages: req.body.pet_images
     });
 
     const customConfig = (api_url && api_key) ? { api_url, api_key, api_model } : null;
