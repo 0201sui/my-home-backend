@@ -1719,73 +1719,64 @@ async function fetchWeather(city, query) {
   } catch (e) { return null; }
 }
 
-// 通用网页搜索：抓取 DuckDuckGo HTML（Render 美国 IP 可直连，返回真实网页结果）
-async function ddgHtmlSearch(query) {
+// 从查询里剥离时间/口水词，得到更干净的检索主题词
+function cleanQuery(query) {
+  return (query || '')
+    .replace(/今天|明天|后天|现在|目前|实时|最近|当前|一下|请问|帮我|查一下|搜索|搜一下|的|是什么|怎么样|如何|多少|吗|呢|啊|哦/g, '')
+    .replace(/\s+/g, ' ').trim();
+}
+
+// 维基百科检索：用 generator=search + prop=extracts 直接拿到干净的条目简介（比 list=search 的带标签摘要好很多）
+async function wikiSearch(query) {
   const results = [];
-  try {
-    const resp = await fetch('https://html.duckduckgo.com/html/', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8'
-      },
-      body: new URLSearchParams({ q: query, kl: 'cn-zh' }).toString()
-    });
-    const html = await resp.text();
-    // 每条结果：<a ... class="result__a" href="...">标题</a> ... <a class="result__snippet" ...>摘要</a>
-    const blockRe = /class="result__a"[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>[\s\S]*?class="result__snippet"[^>]*>([\s\S]*?)<\/a>/g;
-    let m;
-    while ((m = blockRe.exec(html)) !== null && results.length < 6) {
-      let href = decodeEntities(m[1]);
-      // DDG 跳转链接 //duckduckgo.com/l/?uddg=<encoded>
-      const uddg = href.match(/[?&]uddg=([^&]+)/);
-      if (uddg) { try { href = decodeURIComponent(uddg[1]); } catch (e) {} }
-      const title = decodeEntities(m[2].replace(/<[^>]+>/g, '')).trim();
-      const snippet = decodeEntities(m[3].replace(/<[^>]+>/g, '')).trim();
-      if (title && snippet) results.push({ title, snippet, url: href });
-    }
-  } catch (e) { /* ignore, 交给下方兜底 */ }
+  const q = cleanQuery(query) || query;
+  const doWiki = async (lang) => {
+    try {
+      const url = `https://${lang}.wikipedia.org/w/api.php?action=query&generator=search&gsrsearch=${encodeURIComponent(q)}&gsrlimit=4&prop=extracts|info&inprop=url&exintro=1&explaintext=1&exsentences=4&format=json&origin=*`;
+      const data = await (await fetch(url, { headers: { 'User-Agent': 'fish-talk/1.0' } })).json();
+      const pages = data.query && data.query.pages;
+      if (!pages) return;
+      const arr = Object.values(pages).sort((a, b) => (a.index || 0) - (b.index || 0));
+      for (const p of arr) {
+        const extract = (p.extract || '').trim();
+        if (!extract) continue;
+        results.push({
+          title: p.title,
+          snippet: extract.slice(0, 240),
+          url: p.fullurl || `https://${lang}.wikipedia.org/wiki/${encodeURIComponent(p.title)}`
+        });
+      }
+    } catch (e) { /* ignore */ }
+  };
+  await doWiki('zh');
+  if (results.length === 0) await doWiki('en');
   return results;
 }
 
+// 说明：DuckDuckGo（HTML/Lite/Instant Answer）与网易/GD Studio 等聚合源，
+// 从 Render 美国机房出网会被 Cloudflare 或反爬（返回 403/202 挑战页）拦截，无法稳定使用。
+// 因此后端联网搜索采用「实时数据用专用可直连源 + 事实类用维基百科」的组合。
 async function webSearch(query, city) {
   const results = [];
   try {
-    // 1) 天气类问题走 wttr.in（最准）
-    if (/天气|气温|温度|下雨|降雨|降水|冷不冷|热不热/.test(query)) {
+    // 1) 天气类 → wttr.in（Render 可直连，实时准确）
+    if (/天气|气温|温度|下雨|降雨|降水|冷不冷|热不热|穿什么|气象/.test(query)) {
       const w = await fetchWeather(city, query);
       if (w) results.push(w);
     }
 
-    // 2) 通用问题走 DuckDuckGo HTML 真实网页结果
-    if (results.length < 3) {
-      let q = query;
-      if (city && /天气|气温|温度/.test(query) && !query.includes(city)) q = `${city} ${query}`;
-      const ddg = await ddgHtmlSearch(q);
-      for (const r of ddg) { if (results.length >= 6) break; results.push(r); }
-    }
+    // 2) DuckDuckGo Instant Answer（偶尔能给直接答案/计算/定义，能直连时才有值）
+    try {
+      const ddgUrl = `https://api.duckduckgo.com/?q=${encodeURIComponent(cleanQuery(query) || query)}&format=json&no_html=1&skip_disambig=1&no_redirect=1`;
+      const ddgData = await (await fetch(ddgUrl)).json();
+      if (ddgData.Answer) results.push({ title: '直接回答', snippet: String(ddgData.Answer), url: ddgData.AbstractURL || '' });
+      else if (ddgData.AbstractText) results.push({ title: ddgData.Heading || query, snippet: ddgData.AbstractText, url: ddgData.AbstractURL || '' });
+    } catch (e) {}
 
-    // 3) 兜底：DuckDuckGo Instant Answer + Wikipedia（只有前面都没结果时才用）
-    if (results.length === 0) {
-      try {
-        const ddgUrl = `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1&no_redirect=1`;
-        const ddgData = await (await fetch(ddgUrl)).json();
-        if (ddgData.Answer) results.push({ title: '直接回答', snippet: ddgData.Answer, url: '' });
-        if (ddgData.AbstractText) results.push({ title: ddgData.Heading || query, snippet: ddgData.AbstractText, url: ddgData.AbstractURL || '' });
-      } catch (e) {}
-    }
-    if (results.length === 0) {
-      try {
-        const wikiUrl = `https://zh.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(query)}&format=json&srlimit=3`;
-        const wikiData = await (await fetch(wikiUrl)).json();
-        if (wikiData.query?.search) {
-          for (const item of wikiData.query.search) {
-            const snippet = item.snippet?.replace(/<[^>]+>/g, '') || '';
-            results.push({ title: item.title, snippet, url: `https://zh.wikipedia.org/wiki/${encodeURIComponent(item.title)}` });
-          }
-        }
-      } catch (e) {}
+    // 3) 事实/百科类 → 维基百科干净简介
+    if (results.length < 3) {
+      const wiki = await wikiSearch(query);
+      for (const r of wiki) { if (results.length >= 6) break; results.push(r); }
     }
 
     return results.slice(0, 6);
@@ -1794,29 +1785,6 @@ async function webSearch(query, city) {
     return results.slice(0, 6);
   }
 }
-
-// 临时诊断 DDG HTML 结构（用完即删）
-app.get('/debug/ddg', async (req, res) => {
-  try {
-    const resp = await fetch('https://html.duckduckgo.com/html/', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36', 'Accept-Language': 'zh-CN,zh;q=0.9' },
-      body: new URLSearchParams({ q: '周杰伦 最新专辑', kl: 'cn-zh' }).toString()
-    });
-    const html = await resp.text();
-    const idxA = html.indexOf('result__a');
-    const idxSnip = html.indexOf('result__snippet');
-    res.json({
-      status: resp.status,
-      len: html.length,
-      hasResultA: idxA,
-      hasSnippet: idxSnip,
-      aroundA: idxA >= 0 ? html.slice(idxA - 60, idxA + 220) : '',
-      aroundSnip: idxSnip >= 0 ? html.slice(idxSnip - 30, idxSnip + 220) : '',
-      head: html.slice(0, 120)
-    });
-  } catch (e) { res.json({ error: e.message }); }
-});
 
 app.post('/search', async (req, res) => {
   const { query } = req.body;
