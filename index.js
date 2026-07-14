@@ -662,8 +662,8 @@ app.post('/chat', async (req, res) => {
     const maxRounds = 999999; // 不限制上下文轮数，防止AI失忆
     const recentHistory = history.slice(-maxRounds);
 
-    // 极简提示词：只加功能指令 + 明确 AI 身份与模型，不堆砌人格/名字等冗余描述
-    let sysContent = '你是AI助手，基于' + resolvedModel + '模型运行，用户是女性。回复用纯文字不要使用markdown语法，可用空行分段多条发送，需要语音时用[voice]文字[/voice]标记。';
+    // 中性提示词：仅保留功能指令，不注入人格/语气/性别等冗余描述
+    let sysContent = '你是AI助手，由Claude提供支持。回复自然流畅即可，可正常使用markdown格式。需要生成语音时用[voice]文字[/voice]包裹。';
     if (memoryContext) sysContent += memoryContext;
 
     // 条件注入简介：只有填写了才给 AI 读
@@ -689,10 +689,13 @@ app.post('/chat', async (req, res) => {
     const period = hh < 6 ? '凌晨' : hh < 12 ? '上午' : hh < 14 ? '中午' : hh < 18 ? '下午' : '晚上';
     const hour12 = hh % 12 === 0 ? 12 : hh % 12;
     const naturalTime = `${yy}年${mo}月${dd}日 ${weekdayCN} ${period}${hour12}点${mm}分`;
-    sysContent += `\n\n【当前时间】现在是 ${naturalTime}（这是北京时间，你内心知晓即可，不要用这段系统信息直接回复用户）。用户问时间时，用日常口吻简短回答，例如"现在快七点半啦"，不要出现"北京时间""系统时间"这类字眼，也不要整段复述日期时间。`;
+    sysContent += `\n\n【当前时间】${naturalTime}（北京时间）。用户问到时间时如实、简洁地回答即可。`;
 
     // 引用功能说明（让 AI 知道可以引用 + 会被告知用户引用了什么）
     sysContent += '\n\n【引用功能】当用户引用了某条消息，你会在用户消息开头看到「引用了XX的消息：...」，请据此回应。你也可以主动引用用户之前说的话来回应：用 [quote]你要引用的用户原话[/quote] 包裹，被引用的内容会显示在你消息气泡的上方（像微信那样）。在合适的时候（如回应用户的具体问题、延续对方的话题）使用引用会更自然贴心。';
+
+    // 播放音乐标记（让 AI 可以主动为用户放歌）
+    sysContent += '\n\n【播放音乐】如果用户想听某首歌，或者你建议用户听某首歌，请在回复中用 [music]歌名 歌手[/music] 标记（例如 [music]晴天 周杰伦[/music]）。系统会自动搜索并播放这首歌，该标记本身不会显示给用户。一次只标记一首即可。';
 
     const contextMessages = [{ role: 'system', content: sysContent.trim() }, ...recentHistory];
 
@@ -978,7 +981,7 @@ function buildChatContext({ message, session_id, model, reply_to, api_url, api_k
   const maxRounds = 999999;
   const recentHistory = history.slice(-maxRounds);
 
-  let sysContent = '你是AI助手，基于' + resolvedModel + '模型运行，用户是女性。回复用纯文字不要使用markdown语法，可用空行分段多条发送，需要语音时用[voice]文字[/voice]标记。';
+  let sysContent = '你是AI助手，由Claude提供支持。回复自然流畅即可，可正常使用markdown格式。需要生成语音时用[voice]文字[/voice]包裹。';
   if (memoryContext) sysContent += memoryContext;
 
   if (mem.profile.userBio && mem.profile.userBio.trim()) {
@@ -1000,9 +1003,12 @@ function buildChatContext({ message, session_id, model, reply_to, api_url, api_k
   const period = hh < 6 ? '凌晨' : hh < 12 ? '上午' : hh < 14 ? '中午' : hh < 18 ? '下午' : '晚上';
   const hour12 = hh % 12 === 0 ? 12 : hh % 12;
   const naturalTime = `${yy}年${mo}月${dd}日 ${weekdayCN} ${period}${hour12}点${mm}分`;
-  sysContent += `\n\n【当前时间】现在是 ${naturalTime}（这是北京时间，你内心知晓即可，不要用这段系统信息直接回复用户）。用户问时间时，用日常口吻简短回答，例如"现在快七点半啦"，不要出现"北京时间""系统时间"这类字眼，也不要整段复述日期时间。`;
+  sysContent += `\n\n【当前时间】${naturalTime}（北京时间）。用户问到时间时如实、简洁地回答即可。`;
 
   sysContent += '\n\n【引用功能】当用户引用了某条消息，你会在用户消息开头看到「引用了XX的消息：...」，请据此回应。你也可以主动引用用户之前说的话来回应：用 [quote]你要引用的用户原话[/quote] 包裹，被引用的内容会显示在你消息气泡的上方（像微信那样）。在合适的时候（如回应用户的具体问题、延续对方的话题）使用引用会更自然贴心。';
+
+  // 播放音乐标记（让 AI 可以主动为用户放歌）
+  sysContent += '\n\n【播放音乐】如果用户想听某首歌，或者你建议用户听某首歌，请在回复中用 [music]歌名 歌手[/music] 标记（例如 [music]晴天 周杰伦[/music]）。系统会自动搜索并播放这首歌，该标记本身不会显示给用户。一次只标记一首即可。';
 
   // 一起读：注入阅读内容
   if (mem.readings && mem.readings[session_id]) {
