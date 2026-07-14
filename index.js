@@ -901,6 +901,12 @@ async function callModelStream(messages, modelName, settings, customConfig) {
 }
 
 // ===== 组装系统提示词（精简版：控制长度，避免占用过多上下文窗口导致 AI 失忆）=====
+// 应用功能清单（AI 自我认知 + 自我操作能力，更新功能后 AI 自动知晓）
+let FEATURES_MANIFEST = '';
+try {
+  FEATURES_MANIFEST = fs.readFileSync(path.join(__dirname, 'features.json'), 'utf-8');
+} catch (e) { FEATURES_MANIFEST = ''; }
+
 function composeSystemPrompt(session_id, music_info) {
   const now = new Date();
   // 像朋友一样自然对话，不使用括号/引号/星号等符号，也不使用 markdown 格式符号
@@ -918,10 +924,13 @@ function composeSystemPrompt(session_id, music_info) {
   }
   // 简介（截断）
   if (mem.profile.userBio && mem.profile.userBio.trim()) {
-    sys += `\n\n【用户简介】${mem.profile.userName || '用户'}：${mem.profile.userBio.trim().slice(0, 150)}`;
+    sys += `\n\n【用户简介】${mem.profile.userName || '用户'}${mem.profile.nickname ? '（你平时称呼TA为「' + mem.profile.nickname + '」）' : ''}：${mem.profile.userBio.trim().slice(0, 150)}`;
   }
   if (mem.profile.aiBio && mem.profile.aiBio.trim()) {
     sys += `\n\n【AI简介】${mem.profile.aiName || '裴拟'}：${mem.profile.aiBio.trim().slice(0, 150)}`;
+  }
+  if (mem.profile.aiName && mem.profile.aiName.trim()) {
+    sys += `\n\n【你的名字】你现在的名字是「${mem.profile.aiName.trim()}」，请以此自称并让用户这样称呼你。`;
   }
   // 时间感知（北京时间）
   const shParts = new Intl.DateTimeFormat('zh-CN', {
@@ -950,6 +959,26 @@ function composeSystemPrompt(session_id, music_info) {
   if (music_info && music_info.name) {
     sys += `\n\n【正在播放】《${music_info.name}》- ${music_info.artist || '未知歌手'}${music_info.duration ? '（' + music_info.duration + '）' : ''}。可自然聊音乐。`;
   }
+
+  // 应用功能清单（AI 自我认知：知道自己有哪些功能，更新后自动知晓）
+  if (FEATURES_MANIFEST) {
+    try {
+      const f = JSON.parse(FEATURES_MANIFEST);
+      const featText = (f.features || []).map(x => `• ${x.name}：${x.desc}`).join('\n');
+      sys += `\n\n【本应用功能】你运行在「${f.appName}」这个网页应用里，它目前拥有以下功能：\n${featText}\n当功能更新时，你会自动获得最新清单，无需用户再次说明。`;
+    } catch (e) {}
+  }
+
+  // AI 自我操作协议（直接操作界面，标记不会显示给用户）
+  sys += `\n\n【你可以直接操作界面】在回复里嵌入指令标记即可操作这个网页（这些标记不会被用户看到，正常聊天文字照常显示）：\n` +
+    `[act]theme:海洋蓝|浅橙|浅灰|浅紫[/act] —— 切换主题配色\n` +
+    `[act]open:音乐|简介|记忆宫殿|工具栏|一起读[/act] —— 打开对应面板\n` +
+    `[act]type:文字内容[/act] —— 把文字输入到聊天输入框（像替用户打字）\n` +
+    `[act]send[/act] —— 发送输入框里的内容\n` +
+    `[act]nickname:昵称[/act] —— 熟悉后给用户取个昵称并自动保存到「简介」\n` +
+    `[act]ainame:名字[/act] —— 当用户给你取了新名字时，把你的名字更新到「简介」并保存\n` +
+    `示例：用户说“以后叫你小鱼吧”，你就回 [act]ainame:小鱼[/act] 并在对话里自然地接受这个新名字。一次回复最多用 1-2 个指令，其余正常聊天即可。`;
+
   return sys.trim();
 }
 
