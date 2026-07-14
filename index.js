@@ -25,7 +25,7 @@ const mem = {
   readings: {},
   settings: null,
   stickers: [],
-  profile: { userBio: '', aiBio: '', userName: '我', aiName: '裴拟' },
+  profile: { userBio: '', aiBio: '', userName: '我', aiName: '裴拟', nickname: '', petImage: '', petImages: [] },
   _id: 1
 };
 function nextId() { const id = String(mem._id++); scheduleSave(); return id; }
@@ -560,11 +560,18 @@ app.get('/stickers', (req, res) => {
 });
 
 app.post('/stickers', (req, res) => {
-  const { urls } = req.body;
-  if (!Array.isArray(urls)) return res.status(400).json({ success: false, error: 'urls 必须是数组' });
-  const newStickers = urls.map(url => ({ id: nextId(), url, createdAt: new Date().toISOString() }));
-  mem.stickers.push(...newStickers);
-  res.json({ success: true, data: newStickers });
+  const body = req.body || {};
+  // 兼容：{ urls: [...] } 或 { stickers: [{id,url,meaning,category}] }
+  let incoming = [];
+  if (Array.isArray(body.urls)) {
+    incoming = body.urls.map(url => ({ id: String(nextId()), url, meaning: '', category: '默认', createdAt: new Date().toISOString() }));
+  } else if (Array.isArray(body.stickers)) {
+    incoming = body.stickers.map(s => ({ id: String(s.id || nextId()), url: s.url, meaning: s.meaning || '', category: s.category || '默认', createdAt: s.createdAt || new Date().toISOString() }));
+  } else {
+    return res.status(400).json({ success: false, error: 'urls 或 stickers 必须是数组' });
+  }
+  mem.stickers.push(...incoming);
+  res.json({ success: true, data: incoming });
 });
 
 app.delete('/stickers/:id', (req, res) => {
@@ -653,7 +660,7 @@ app.post('/chat', async (req, res) => {
     const recentHistory = history.slice(-maxRounds);
 
     // 精简系统提示词（与 buildChatContext 一致，控制长度避免 AI 失忆）
-    let sysContent = composeSystemPrompt(session_id, req.body.music_info);
+    let sysContent = composeSystemPrompt(session_id, req.body.music_info, req.body.sticker_meanings || []);
 
     const contextMessages = [{ role: 'system', content: sysContent.trim() }, ...recentHistory];
 
@@ -907,7 +914,7 @@ try {
   FEATURES_MANIFEST = fs.readFileSync(path.join(__dirname, 'features.json'), 'utf-8');
 } catch (e) { FEATURES_MANIFEST = ''; }
 
-function composeSystemPrompt(session_id, music_info) {
+function composeSystemPrompt(session_id, music_info, stickerMeanings) {
   const now = new Date();
   // 像朋友一样自然对话，不使用括号/引号/星号等符号，也不使用 markdown 格式符号
   let sys = '你是AI助手，由Claude提供支持。像朋友一样自然地聊天，不要使用括号（）、引号""、方括号[]或星号*来表达动作或旁白，也不要用加粗/斜体/标题等格式符号，直接说就行。需要生成语音时用[voice]文字[/voice]包裹。';
@@ -931,6 +938,11 @@ function composeSystemPrompt(session_id, music_info) {
   }
   if (mem.profile.aiName && mem.profile.aiName.trim()) {
     sys += `\n\n【你的名字】你现在的名字是「${mem.profile.aiName.trim()}」，请以此自称并让用户这样称呼你。`;
+  }
+  // 桌宠图片库（让用户/AI 都能从中选择桌宠形象）
+  if (Array.isArray(mem.profile.petImages) && mem.profile.petImages.length > 0) {
+    const list = mem.profile.petImages.map((p, i) => `${i + 1}. ${p.name || ('图片' + (i + 1))}（id=${p.id}）`).join('\n');
+    sys += `\n\n【桌宠图片库】用户上传了以下桌宠形象，你可以选用：\n${list}\n想换桌宠时回 [act]pet:<对应的id>[/act]（例如 [act]pet:${mem.profile.petImages[0].id}[/act]）。`;
   }
   // 时间感知（北京时间）
   const shParts = new Intl.DateTimeFormat('zh-CN', {
@@ -979,11 +991,18 @@ function composeSystemPrompt(session_id, music_info) {
     `[act]ainame:名字[/act] —— 只有当用户认真、持续地用某个新名字称呼你（而不是一次性的玩笑或测试）时，才把你的名字更新到「简介」并保存。一次性的逗趣绰号不要保存。\n` +
     `示例：用户说“以后叫你小鱼吧”并且是认真的，你就回 [act]ainame:小鱼[/act] 并自然接受；若用户只是调侃“你这笨鱼”，则不要保存。这类指令一次回复最多用 1 个，其余正常聊天即可。`;
 
+  // 表情包含义（让用户发的表情包更易被你理解）
+  const _stickerMeanings = Array.isArray(stickerMeanings) ? stickerMeanings : (mem.stickers || []);
+  if (_stickerMeanings.length > 0) {
+    const items = _stickerMeanings.filter(s => s && s.meaning && s.meaning.trim()).map((s, i) => `${i + 1}. ${s.meaning.trim()}`);
+    if (items.length) sys += `\n\n【表情包含义】用户可能发来这些表情包，含义分别是：\n${items.join('\n')}\n结合图片内容与含义来理解用户的情绪和意图。`;
+  }
+
   return sys.trim();
 }
 
 // ===== 构建对话上下文（复用逻辑）=====
-function buildChatContext({ message, session_id, model, reply_to, api_url, api_key, api_model, images, file_content, temperature, max_context_rounds, auto_summarize_after, compress_keep_rounds, max_reply_tokens, music_info }) {
+function buildChatContext({ message, session_id, model, reply_to, api_url, api_key, api_model, images, file_content, temperature, max_context_rounds, auto_summarize_after, compress_keep_rounds, max_reply_tokens, music_info, sticker_meanings }) {
   const now = new Date();
   const resolvedModel = (model === 'deepseek') ? 'deepseek-chat' : (api_model || '[特价MAX-CC]claude-sonnet-5');
   let settings = { ...defaultSettings };
@@ -1011,7 +1030,7 @@ function buildChatContext({ message, session_id, model, reply_to, api_url, api_k
   const maxRounds = 999999;
   const recentHistory = history.slice(-maxRounds);
 
-  let sysContent = composeSystemPrompt(session_id, music_info);
+  let sysContent = composeSystemPrompt(session_id, music_info, sticker_meanings || []);
 
   // 文件内容注入
   let fullMessage = message || '';
@@ -1278,7 +1297,8 @@ app.post('/chat/regenerate', async (req, res) => {
       auto_summarize_after: req.body.auto_summarize_after,
       compress_keep_rounds: req.body.compress_keep_rounds,
       max_reply_tokens: req.body.max_reply_tokens,
-      music_info: req.body.music_info
+      music_info: req.body.music_info,
+      sticker_meanings: req.body.sticker_meanings
     });
 
     const customConfig = (api_url && api_key) ? { api_url, api_key, api_model } : null;
@@ -1425,7 +1445,8 @@ app.post('/chat/respond', async (req, res) => {
       auto_summarize_after,
       compress_keep_rounds,
       max_reply_tokens,
-      music_info: req.body.music_info
+      music_info: req.body.music_info,
+      sticker_meanings: req.body.sticker_meanings
     });
 
     const customConfig = (api_url && api_key) ? { api_url, api_key, api_model } : null;
@@ -1831,7 +1852,16 @@ app.get('/music/detail/:id', async (req, res) => {
     });
     const data = await resp.json();
     const song = data.songs?.[0];
-    if (!song) return res.json({ success: false, error: '未找到歌曲' });
+    if (!song) {
+      // 兜底：用 MetingAPI 取封面
+      try {
+        const m = await fetch(`https://api.injahow.cn/meting/?server=netease&type=song&id=${id}`, { headers: { 'Referer': 'https://music.163.com', 'User-Agent': 'Mozilla/5.0' } });
+        const mj = await m.json();
+        const s = Array.isArray(mj) ? mj[0] : null;
+        if (s) return res.json({ success: true, data: { id: s.id || id, name: s.name, artist: s.artist, album: '', cover: s.pic || '', duration: 0 } });
+      } catch (e) {}
+      return res.json({ success: false, error: '未找到歌曲' });
+    }
     res.json({
       success: true,
       data: {
@@ -1856,7 +1886,16 @@ app.get('/music/lyric/:id', async (req, res) => {
       headers: { 'Referer': 'https://music.163.com', 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
     });
     const data = await resp.json();
-    res.json({ success: true, lyric: data.lrc?.lyric || '', tlyric: data.tlyric?.lyric || '' });
+    let lyric = data.lrc?.lyric || '';
+    if (!lyric) {
+      // 兜底：用 MetingAPI 取歌词
+      try {
+        const m = await fetch(`https://api.injahow.cn/meting/?server=netease&type=lrc&id=${id}`, { headers: { 'Referer': 'https://music.163.com', 'User-Agent': 'Mozilla/5.0' } });
+        lyric = await m.text();
+        if (lyric && !lyric.trim().startsWith('{')) { /* 直接是 lrc 文本 */ } else { lyric = ''; }
+      } catch (e) { lyric = ''; }
+    }
+    res.json({ success: true, lyric, tlyric: data.tlyric?.lyric || '' });
   } catch (err) {
     res.json({ success: true, lyric: '' });
   }
@@ -1864,21 +1903,21 @@ app.get('/music/lyric/:id', async (req, res) => {
 
 app.get('/music/url/:id', async (req, res) => {
   const { id } = req.params;
+  const H = { 'Referer': 'https://music.163.com', 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' };
   try {
+    // 1) 官方接口（有登录态/cookie 时返回可直接播放的 CDN 地址）
     const urlApi = `https://music.163.com/api/song/enhance/player/url/v1?ids=[${id}]&level=standard&encodeType=mp3`;
-    const resp = await fetch(urlApi, {
-      headers: { 'Referer': 'https://music.163.com', 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
-    });
+    const resp = await fetch(urlApi, { headers: H });
     const data = await resp.json();
     const songData = data.data?.[0];
-    if (songData && songData.url) {
-      res.json({ success: true, url: songData.url });
-    } else {
-      // Fallback: try outer URL
-      res.json({ success: true, url: `https://music.163.com/song/media/outer/url?id=${id}.mp3` });
+    if (songData && songData.url && /music\.(126|163)\.net/.test(songData.url)) {
+      return res.json({ success: true, url: songData.url });
     }
+    // 2) MetingAPI 代理（无需 cookie；该地址本身就是可串流播放的音频流，交给前端 <audio> 直接加载）
+    return res.json({ success: true, url: `https://api.injahow.cn/meting/?server=netease&type=url&id=${id}` });
   } catch (err) {
-    res.json({ success: true, url: `https://music.163.com/song/media/outer/url?id=${id}.mp3` });
+    // 兜底：仍返回 meting 代理地址
+    res.json({ success: true, url: `https://api.injahow.cn/meting/?server=netease&type=url&id=${id}` });
   }
 });
 
