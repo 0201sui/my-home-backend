@@ -1697,7 +1697,13 @@ function decodeEntities(s) {
 // 天气：优先用 wttr.in（免费、无需 key、Render 可直连、数据实时且准确）
 async function fetchWeather(city, query) {
   try {
-    const loc = city || (query.match(/([\u4e00-\u9fa5]{2,10}?)(?:市|区|县)?(?:今天|明天|现在|的)?(?:天气|气温|温度)/) || [])[1] || '';
+    let loc = city || '';
+    if (!loc) {
+      // 先去掉时间词，避免把「今天上海」当成城市名
+      const cleaned = (query || '').replace(/今天|明天|后天|现在|目前|实时|最近|当前|一下|请问|的|怎么样|如何|吗|呢/g, '');
+      const m = cleaned.match(/([\u4e00-\u9fa5]{2,8}?)(?:市|区|县|省)?(?:天气|气温|温度|下雨|降雨|降水|冷|热)/);
+      loc = (m && m[1]) || '';
+    }
     if (!loc) return null;
     const url = `https://wttr.in/${encodeURIComponent(loc)}?format=j1&lang=zh`;
     const resp = await fetch(url, { headers: { 'User-Agent': 'curl/8.0', 'Accept-Language': 'zh-CN' } });
@@ -1806,10 +1812,16 @@ app.get('/debug/net', async (req, res) => {
       out[name] = { status: r.status, len: t.length, head: t.slice(0, 180) };
     } catch (e) { out[name] = { error: e.message, cause: (e.cause && e.cause.code) || '' }; }
   };
-  await probe('gd_search', 'https://music-api.gdstudio.xyz/api.php?types=search&source=netease&name=' + encodeURIComponent('晴天') + '&count=2&pages=1', { headers: { 'User-Agent': 'Mozilla/5.0', 'Referer': 'https://music.gdstudio.xyz/' } });
-  await probe('wttr', 'https://wttr.in/Shanghai?format=j1', { headers: { 'User-Agent': 'curl/8.0' } });
-  await probe('ddg', 'https://html.duckduckgo.com/html/?q=' + encodeURIComponent('test'), { headers: { 'User-Agent': 'Mozilla/5.0' } });
-  await probe('ddg_ia', 'https://api.duckduckgo.com/?q=test&format=json', {});
+  const UA = { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36' };
+  // 候选音乐源（找一个不被 Cloudflare 拦、能从 Render 美国机房访问的）
+  await probe('meting_injahow_search', 'https://api.injahow.cn/meting/?server=netease&type=search&id=' + encodeURIComponent('晴天'), UA);
+  await probe('meting_injahow_url', 'https://api.injahow.cn/meting/?server=netease&type=url&id=186016', UA);
+  await probe('ncm_vercel1', 'https://netease-cloud-music-api-gamma-lemon.vercel.app/search?keywords=' + encodeURIComponent('晴天'), UA);
+  await probe('ncm_zhousg', 'https://music-api.heheda.top/search?keywords=' + encodeURIComponent('晴天'), UA);
+  await probe('meting_qjqq', 'https://meting.qjqq.cn/?server=netease&type=search&id=' + encodeURIComponent('晴天'), UA);
+  await probe('itunes', 'https://itunes.apple.com/search?term=' + encodeURIComponent('晴天 周杰伦') + '&media=music&limit=3', UA);
+  await probe('netease_official_url', 'https://music.163.com/song/media/outer/url?id=186016', UA);
+  await probe('wttr_cn', 'https://wttr.in/' + encodeURIComponent('上海') + '?format=j1&lang=zh', { 'User-Agent': 'curl/8.0' });
   res.json(out);
 });
 
