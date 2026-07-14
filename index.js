@@ -1685,61 +1685,107 @@ function shouldSearch(message, searchEnabled) {
   return keywords.some(kw => lower.includes(kw));
 }
 
-async function webSearch(query, city) {
+// HTML 实体解码（用于清洗抓取到的文本）
+function decodeEntities(s) {
+  if (!s) return '';
+  return s
+    .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&#x27;/g, "'")
+    .replace(/&nbsp;/g, ' ').replace(/&#(\d+);/g, (m, d) => String.fromCharCode(parseInt(d, 10)));
+}
+
+// 天气：优先用 wttr.in（免费、无需 key、Render 可直连、数据实时且准确）
+async function fetchWeather(city, query) {
   try {
-    // 如果是天气相关查询且有城市，在查询中加入城市名
-    let searchQuery = query;
-    if (city && (query.includes('天气') || query.includes('气温') || query.includes('温度'))) {
-      searchQuery = `${city} ${query}`;
+    const loc = city || (query.match(/([\u4e00-\u9fa5]{2,10}?)(?:市|区|县)?(?:今天|明天|现在|的)?(?:天气|气温|温度)/) || [])[1] || '';
+    if (!loc) return null;
+    const url = `https://wttr.in/${encodeURIComponent(loc)}?format=j1&lang=zh`;
+    const resp = await fetch(url, { headers: { 'User-Agent': 'curl/8.0', 'Accept-Language': 'zh-CN' } });
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    const cur = data.current_condition && data.current_condition[0];
+    const today = data.weather && data.weather[0];
+    if (!cur) return null;
+    const desc = (cur.lang_zh && cur.lang_zh[0] && cur.lang_zh[0].value) || (cur.weatherDesc && cur.weatherDesc[0] && cur.weatherDesc[0].value) || '';
+    let snippet = `${loc} 当前 ${cur.temp_C}°C（体感 ${cur.FeelsLikeC}°C），${desc}，湿度 ${cur.humidity}%，风速 ${cur.windspeedKmph}km/h。`;
+    if (today) snippet += `今天最高 ${today.maxtempC}°C / 最低 ${today.mintempC}°C。`;
+    return { title: `${loc} 实时天气`, snippet, url: `https://wttr.in/${encodeURIComponent(loc)}` };
+  } catch (e) { return null; }
+}
+
+// 通用网页搜索：抓取 DuckDuckGo HTML（Render 美国 IP 可直连，返回真实网页结果）
+async function ddgHtmlSearch(query) {
+  const results = [];
+  try {
+    const resp = await fetch('https://html.duckduckgo.com/html/', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8'
+      },
+      body: new URLSearchParams({ q: query, kl: 'cn-zh' }).toString()
+    });
+    const html = await resp.text();
+    // 每条结果：<a ... class="result__a" href="...">标题</a> ... <a class="result__snippet" ...>摘要</a>
+    const blockRe = /class="result__a"[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>[\s\S]*?class="result__snippet"[^>]*>([\s\S]*?)<\/a>/g;
+    let m;
+    while ((m = blockRe.exec(html)) !== null && results.length < 6) {
+      let href = decodeEntities(m[1]);
+      // DDG 跳转链接 //duckduckgo.com/l/?uddg=<encoded>
+      const uddg = href.match(/[?&]uddg=([^&]+)/);
+      if (uddg) { try { href = decodeURIComponent(uddg[1]); } catch (e) {} }
+      const title = decodeEntities(m[2].replace(/<[^>]+>/g, '')).trim();
+      const snippet = decodeEntities(m[3].replace(/<[^>]+>/g, '')).trim();
+      if (title && snippet) results.push({ title, snippet, url: href });
     }
-    // 使用 DuckDuckGo Instant Answer API
-    const ddgUrl = `https://api.duckduckgo.com/?q=${encodeURIComponent(searchQuery)}&format=json&no_html=1&skip_disambig=1&no_redirect=1`;
-    const ddgResp = await fetch(ddgUrl);
-    const ddgData = await ddgResp.json();
+  } catch (e) { /* ignore, 交给下方兜底 */ }
+  return results;
+}
 
-    let results = [];
-
-    // 优先用 AbstractText
-    if (ddgData.AbstractText) {
-      results.push({ title: ddgData.Heading || query, snippet: ddgData.AbstractText, url: ddgData.AbstractURL || '' });
+async function webSearch(query, city) {
+  const results = [];
+  try {
+    // 1) 天气类问题走 wttr.in（最准）
+    if (/天气|气温|温度|下雨|降雨|降水|冷不冷|热不热/.test(query)) {
+      const w = await fetchWeather(city, query);
+      if (w) results.push(w);
     }
 
-    // RelatedTopics
-    if (ddgData.RelatedTopics && ddgData.RelatedTopics.length > 0) {
-      for (const t of ddgData.RelatedTopics.slice(0, 5)) {
-        if (t.Text) {
-          results.push({ title: t.Text.slice(0, 60), snippet: t.Text, url: t.FirstURL || '' });
-        }
-        if (t.Topics && t.Topics.length > 0) {
-          for (const sub of t.Topics.slice(0, 2)) {
-            if (sub.Text) results.push({ title: sub.Text.slice(0, 60), snippet: sub.Text, url: sub.FirstURL || '' });
+    // 2) 通用问题走 DuckDuckGo HTML 真实网页结果
+    if (results.length < 3) {
+      let q = query;
+      if (city && /天气|气温|温度/.test(query) && !query.includes(city)) q = `${city} ${query}`;
+      const ddg = await ddgHtmlSearch(q);
+      for (const r of ddg) { if (results.length >= 6) break; results.push(r); }
+    }
+
+    // 3) 兜底：DuckDuckGo Instant Answer + Wikipedia（只有前面都没结果时才用）
+    if (results.length === 0) {
+      try {
+        const ddgUrl = `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1&no_redirect=1`;
+        const ddgData = await (await fetch(ddgUrl)).json();
+        if (ddgData.Answer) results.push({ title: '直接回答', snippet: ddgData.Answer, url: '' });
+        if (ddgData.AbstractText) results.push({ title: ddgData.Heading || query, snippet: ddgData.AbstractText, url: ddgData.AbstractURL || '' });
+      } catch (e) {}
+    }
+    if (results.length === 0) {
+      try {
+        const wikiUrl = `https://zh.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(query)}&format=json&srlimit=3`;
+        const wikiData = await (await fetch(wikiUrl)).json();
+        if (wikiData.query?.search) {
+          for (const item of wikiData.query.search) {
+            const snippet = item.snippet?.replace(/<[^>]+>/g, '') || '';
+            results.push({ title: item.title, snippet, url: `https://zh.wikipedia.org/wiki/${encodeURIComponent(item.title)}` });
           }
         }
-      }
-    }
-
-    // Answer
-    if (ddgData.Answer) {
-      results.unshift({ title: '直接回答', snippet: ddgData.Answer, url: '' });
-    }
-
-    // 如果 DuckDuckGo 没结果，尝试 Wikipedia API
-    if (results.length === 0) {
-      const wikiUrl = `https://zh.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(query)}&format=json&srlimit=3`;
-      const wikiResp = await fetch(wikiUrl);
-      const wikiData = await wikiResp.json();
-      if (wikiData.query?.search) {
-        for (const item of wikiData.query.search) {
-          const snippet = item.snippet?.replace(/<[^>]+>/g, '') || '';
-          results.push({ title: item.title, snippet, url: `https://zh.wikipedia.org/wiki/${encodeURIComponent(item.title)}` });
-        }
-      }
+      } catch (e) {}
     }
 
     return results.slice(0, 6);
   } catch (err) {
     console.error('搜索失败:', err.message);
-    return [];
+    return results.slice(0, 6);
   }
 }
 
@@ -1790,56 +1836,38 @@ app.delete('/read/:sessionId', async (req, res) => {
   res.json({ success: true });
 });
 
-// ===== 音乐搜索与播放 =====
+// ===== 音乐搜索与播放（GD Studio API，海外托管，Render 可直连；网易官方接口封 Render 的美国 IP）=====
+const GD_API = 'https://music-api.gdstudio.xyz/api.php';
+const GD_HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+  'Referer': 'https://music.gdstudio.xyz/'
+};
+// 缓存 歌曲id -> pic_id（GD Studio 取封面需要 pic_id，而前端 detail 接口只带 song id）
+const musicPicCache = {};
+
 app.post('/music/search', async (req, res) => {
   const { keyword } = req.body;
   if (!keyword) return res.status(400).json({ error: '缺少搜索关键词' });
   try {
-    // 使用网易云搜索API (POST with form data)
-    const params = new URLSearchParams({
-      s: keyword,
-      type: '1',
-      offset: '0',
-      total: 'true',
-      limit: '15'
-    });
-    const resp = await fetch('https://music.163.com/api/search/get', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'Referer': 'https://music.163.com',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-      },
-      body: params.toString()
-    });
+    const url = `${GD_API}?types=search&source=netease&name=${encodeURIComponent(keyword)}&count=15&pages=1`;
+    const resp = await fetch(url, { headers: GD_HEADERS });
     const text = await resp.text();
     let data;
-    try { data = JSON.parse(text); } catch { data = {}; }
-    let songs = (data.result?.songs || []).map(s => ({
-      id: s.id,
-      name: s.name,
-      artist: (s.artists || []).map(a => a.name).join(' / '),
-      album: s.album?.name || '',
-      duration: s.duration || 0
-    }));
-    // 如果没结果，尝试备用搜索
-    if (songs.length === 0) {
-      const altResp = await fetch(`https://music.163.com/api/search/pc?s=${encodeURIComponent(keyword)}&type=1&offset=0&limit=15`, {
-        method: 'GET',
-        headers: {
-          'Referer': 'https://music.163.com',
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        }
-      });
-      const altData = await altResp.json();
-      songs = (altData.result?.songs || []).map(s => ({
+    try { data = JSON.parse(text); } catch { data = []; }
+    const arr = Array.isArray(data) ? data : (data.songs || data.result?.songs || []);
+    const songs = arr.map(s => {
+      const artist = Array.isArray(s.artist) ? s.artist.join(' / ') : (s.artist || s.author || '');
+      if (s.id && s.pic_id) musicPicCache[String(s.id)] = s.pic_id;
+      return {
         id: s.id,
-        name: s.name,
-        artist: (s.artists || []).map(a => a.name).join(' / '),
-        album: s.album?.name || '',
-        duration: s.duration || 0
-      }));
-    }
+        name: s.name || s.title || '',
+        artist,
+        album: s.album || '',
+        pic_id: s.pic_id || '',
+        lyric_id: s.lyric_id || s.id,
+        duration: 0
+      };
+    }).filter(s => s.id && s.name);
     res.json({ success: true, songs });
   } catch (err) {
     console.error('音乐搜索失败:', err.message);
@@ -1849,57 +1877,36 @@ app.post('/music/search', async (req, res) => {
 
 app.get('/music/detail/:id', async (req, res) => {
   const { id } = req.params;
+  const picId = req.query.pic_id || musicPicCache[String(id)] || '';
   try {
-    const detailUrl = `https://music.163.com/api/song/detail/?ids=[${id}]`;
-    const resp = await fetch(detailUrl, {
-      headers: { 'Referer': 'https://music.163.com', 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
-    });
-    const data = await resp.json();
-    const song = data.songs?.[0];
-    if (!song) {
-      // 兜底：用 MetingAPI 取封面
+    let cover = '';
+    if (picId) {
       try {
-        const m = await fetch(`https://api.injahow.cn/meting/?server=netease&type=song&id=${id}`, { headers: { 'Referer': 'https://music.163.com', 'User-Agent': 'Mozilla/5.0' } });
-        const mj = await m.json();
-        const s = Array.isArray(mj) ? mj[0] : null;
-        if (s) return res.json({ success: true, data: { id: s.id || id, name: s.name, artist: s.artist, album: '', cover: s.pic || '', duration: 0 } });
-      } catch (e) {}
-      return res.json({ success: false, error: '未找到歌曲' });
+        const picUrl = `${GD_API}?types=pic&source=netease&id=${encodeURIComponent(picId)}&size=300`;
+        const pr = await fetch(picUrl, { headers: GD_HEADERS });
+        const pt = await pr.text();
+        let pd; try { pd = JSON.parse(pt); } catch { pd = {}; }
+        cover = pd.url || pd.pic || '';
+      } catch (e) { cover = ''; }
     }
-    res.json({
-      success: true,
-      data: {
-        id: song.id,
-        name: song.name,
-        artist: (song.artists || []).map(a => a.name).join(' / '),
-        album: song.album?.name || '',
-        cover: song.album?.picUrl || '',
-        duration: song.duration || 0
-      }
-    });
+    res.json({ success: true, data: { id, cover, duration: 0 } });
   } catch (err) {
-    res.status(500).json({ error: '获取详情失败: ' + err.message });
+    res.json({ success: true, data: { id, cover: '', duration: 0 } });
   }
 });
 
 app.get('/music/lyric/:id', async (req, res) => {
   const { id } = req.params;
   try {
-    const lyricUrl = `https://music.163.com/api/song/lyric?id=${id}&lv=1&kv=1&tv=-1`;
-    const resp = await fetch(lyricUrl, {
-      headers: { 'Referer': 'https://music.163.com', 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
-    });
-    const data = await resp.json();
-    let lyric = data.lrc?.lyric || '';
-    if (!lyric) {
-      // 兜底：用 MetingAPI 取歌词
-      try {
-        const m = await fetch(`https://api.injahow.cn/meting/?server=netease&type=lrc&id=${id}`, { headers: { 'Referer': 'https://music.163.com', 'User-Agent': 'Mozilla/5.0' } });
-        lyric = await m.text();
-        if (lyric && !lyric.trim().startsWith('{')) { /* 直接是 lrc 文本 */ } else { lyric = ''; }
-      } catch (e) { lyric = ''; }
-    }
-    res.json({ success: true, lyric, tlyric: data.tlyric?.lyric || '' });
+    const lyricUrl = `${GD_API}?types=lyric&source=netease&id=${encodeURIComponent(id)}`;
+    const resp = await fetch(lyricUrl, { headers: GD_HEADERS });
+    const text = await resp.text();
+    let data; try { data = JSON.parse(text); } catch { data = {}; }
+    // GD Studio 返回 { lyric: "...", tlyric: "..." }；也兼容纯文本 LRC
+    let lyric = data.lyric || '';
+    let tlyric = data.tlyric || '';
+    if (!lyric && text && text.trim().startsWith('[')) lyric = text;
+    res.json({ success: true, lyric, tlyric });
   } catch (err) {
     res.json({ success: true, lyric: '' });
   }
@@ -1907,21 +1914,23 @@ app.get('/music/lyric/:id', async (req, res) => {
 
 app.get('/music/url/:id', async (req, res) => {
   const { id } = req.params;
-  const H = { 'Referer': 'https://music.163.com', 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' };
   try {
-    // 1) 官方接口（有登录态/cookie 时返回可直接播放的 CDN 地址）
-    const urlApi = `https://music.163.com/api/song/enhance/player/url/v1?ids=[${id}]&level=standard&encodeType=mp3`;
-    const resp = await fetch(urlApi, { headers: H });
-    const data = await resp.json();
-    const songData = data.data?.[0];
-    if (songData && songData.url && /music\.(126|163)\.net/.test(songData.url)) {
-      return res.json({ success: true, url: songData.url });
+    // GD Studio 直返可直接播放的网易云 CDN 地址（music.126.net），br=320 为 mp3
+    const urlApi = `${GD_API}?types=url&source=netease&id=${encodeURIComponent(id)}&br=320`;
+    const resp = await fetch(urlApi, { headers: GD_HEADERS });
+    const text = await resp.text();
+    let data; try { data = JSON.parse(text); } catch { data = {}; }
+    if (data && data.url) {
+      return res.json({ success: true, url: data.url, br: data.br || 320 });
     }
-    // 2) MetingAPI 代理（无需 cookie；该地址本身就是可串流播放的音频流，交给前端 <audio> 直接加载）
-    return res.json({ success: true, url: `https://api.injahow.cn/meting/?server=netease&type=url&id=${id}` });
+    // 兜底：降到 128
+    const alt = await fetch(`${GD_API}?types=url&source=netease&id=${encodeURIComponent(id)}&br=128`, { headers: GD_HEADERS });
+    const altText = await alt.text();
+    let altData; try { altData = JSON.parse(altText); } catch { altData = {}; }
+    if (altData && altData.url) return res.json({ success: true, url: altData.url, br: altData.br || 128 });
+    return res.json({ success: false, error: '无法获取播放地址' });
   } catch (err) {
-    // 兜底：仍返回 meting 代理地址
-    res.json({ success: true, url: `https://api.injahow.cn/meting/?server=netease&type=url&id=${id}` });
+    res.json({ success: false, error: '获取播放地址失败: ' + err.message });
   }
 });
 
