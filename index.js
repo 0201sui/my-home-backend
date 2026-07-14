@@ -1795,6 +1795,29 @@ async function webSearch(query, city) {
   }
 }
 
+// 临时诊断 DDG HTML 结构（用完即删）
+app.get('/debug/ddg', async (req, res) => {
+  try {
+    const resp = await fetch('https://html.duckduckgo.com/html/', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36', 'Accept-Language': 'zh-CN,zh;q=0.9' },
+      body: new URLSearchParams({ q: '周杰伦 最新专辑', kl: 'cn-zh' }).toString()
+    });
+    const html = await resp.text();
+    const idxA = html.indexOf('result__a');
+    const idxSnip = html.indexOf('result__snippet');
+    res.json({
+      status: resp.status,
+      len: html.length,
+      hasResultA: idxA,
+      hasSnippet: idxSnip,
+      aroundA: idxA >= 0 ? html.slice(idxA - 60, idxA + 220) : '',
+      aroundSnip: idxSnip >= 0 ? html.slice(idxSnip - 30, idxSnip + 220) : '',
+      head: html.slice(0, 120)
+    });
+  } catch (e) { res.json({ error: e.message }); }
+});
+
 app.post('/search', async (req, res) => {
   const { query } = req.body;
   if (!query) return res.status(400).json({ error: '缺少搜索关键词' });
