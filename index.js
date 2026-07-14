@@ -1011,7 +1011,7 @@ function composeSystemPrompt(session_id, music_info, stickerMeanings, petImages)
 }
 
 // ===== 构建对话上下文（复用逻辑）=====
-function buildChatContext({ message, session_id, model, reply_to, api_url, api_key, api_model, images, file_content, temperature, max_context_rounds, auto_summarize_after, compress_keep_rounds, max_reply_tokens, music_info, sticker_meanings, petImages }) {
+function buildChatContext({ message, session_id, model, reply_to, api_url, api_key, api_model, images, image_count, file_content, temperature, max_context_rounds, auto_summarize_after, compress_keep_rounds, max_reply_tokens, music_info, sticker_meanings, petImages }) {
   const now = new Date();
   const resolvedModel = (model === 'deepseek') ? 'deepseek-chat' : (api_model || '[特价MAX-CC]claude-sonnet-5');
   let settings = { ...defaultSettings };
@@ -1054,8 +1054,11 @@ function buildChatContext({ message, session_id, model, reply_to, api_url, api_k
     const lastIdx = contextMessages.length - 1;
     const lastMsg = contextMessages[lastIdx];
     if (lastMsg && lastMsg.role === 'user') {
-      const parts = [];
-      if (fullMessage) parts.push({ type: 'text', text: fullMessage });
+      const total = (typeof image_count === 'number' && image_count > 0) ? image_count : images.length;
+      // 明确告知 AI 本轮图片总数，避免它漏数（图片可能因体积/格式未被模型正确解析时仍有文字依据）
+      const hint = (fullMessage ? fullMessage + '\n' : '') +
+        `（注意：用户本轮共上传了 ${total} 张图片，请全部查看，先说明你看到了几张，再作答）`;
+      const parts = [{ type: 'text', text: hint }];
       images.forEach(img => parts.push({ type: 'image_url', image_url: { url: img } }));
       contextMessages[lastIdx] = { role: 'user', content: parts };
     }
@@ -1073,8 +1076,16 @@ function buildChatContext({ message, session_id, model, reply_to, api_url, api_k
     for (let i = contextMessages.length - 1; i >= 0; i--) {
       if (contextMessages[i].role === 'user') {
         const quoteText = quotedPreviewOf(quotedMsg);
-        const base = (typeof contextMessages[i].content === 'string') ? contextMessages[i].content : (fullMessage || '');
-        contextMessages[i] = { role: 'user', content: `(引用了「${roleName}」的消息：「${quoteText}」)\n\n${base}` };
+        const quoteLine = `(引用了「${roleName}」的消息：「${quoteText}」)`;
+        const c = contextMessages[i].content;
+        if (Array.isArray(c)) {
+          // 保留多模态 parts，把引用作为首条文本拼接进去
+          const textPartIdx = c.findIndex(p => p.type === 'text');
+          if (textPartIdx >= 0) c[textPartIdx].text = `${quoteLine}\n\n${c[textPartIdx].text}`;
+          else c.unshift({ type: 'text', text: quoteLine });
+        } else {
+          contextMessages[i] = { role: 'user', content: `${quoteLine}\n\n${c || ''}` };
+        }
         break;
       }
     }
@@ -1441,6 +1452,21 @@ app.post('/chat/respond', async (req, res) => {
 
     const lastUserMsg = sessionMsgs[lastUserIdx];
 
+    // 收集"本轮"所有待回复用户消息里的图片：用户可能分多次发送图片后再让 AI 回复，
+    // 必须把这一轮的全部图片都带上，AI 才能知道用户总共上传了几张。
+    let pendingImages = [];
+    for (let i = lastUserIdx; i >= 0; i--) {
+      const m = sessionMsgs[i];
+      if (m.role === 'assistant') break; // 遇到上一条 AI 回复即停止，只取当前未回复的这一轮
+      if (m.role === 'user' && Array.isArray(m.images) && m.images.length > 0) {
+        pendingImages = pendingImages.concat(m.images);
+      }
+    }
+    // 安全上限：避免单轮图片过多导致请求体过大 / 模型报错；真实总数会在文案里如实说明
+    const MAX_PENDING_IMAGES = 20;
+    const totalImageCount = pendingImages.length;
+    const imagesForCtx = pendingImages.slice(-MAX_PENDING_IMAGES);
+
     // 用最后一条用户消息重建上下文（不重新保存用户消息）
     const { contextMessages, history, settings } = buildChatContext({
       message: lastUserMsg.content,
@@ -1448,7 +1474,8 @@ app.post('/chat/respond', async (req, res) => {
       model,
       reply_to: lastUserMsg.reply_to,
       api_url, api_key, api_model,
-      images: lastUserMsg.images || [],
+      images: imagesForCtx,
+      image_count: totalImageCount,
       file_content: null,
       temperature,
       max_context_rounds,
