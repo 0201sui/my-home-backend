@@ -266,8 +266,36 @@ app.put('/messages/:id', async (req, res) => {
 app.delete('/messages/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    if (useSupabase) { await supabase.from('messages').delete().eq('id', id); }
-    else { mem.messages = mem.messages.filter(m => m.id !== id); }
+    if (useSupabase) {
+      const { data: all } = await supabase.from('messages').select('id, role, session_id, created_at');
+      const target = (all || []).find(m => m.id === id);
+      if (target && target.role === 'user') {
+        const targetTime = new Date(target.created_at);
+        const idsToDelete = new Set([id]);
+        (all || []).forEach(m => {
+          if (m.session_id === target.session_id && m.role === 'assistant' && new Date(m.created_at) > targetTime) {
+            idsToDelete.add(m.id);
+          }
+        });
+        if (idsToDelete.size > 0) await supabase.from('messages').delete().in('id', Array.from(idsToDelete));
+      } else {
+        await supabase.from('messages').delete().eq('id', id);
+      }
+    } else {
+      const target = mem.messages.find(m => m.id === id);
+      if (target && target.role === 'user') {
+        const targetTime = new Date(target.created_at);
+        const idsToDelete = new Set([id]);
+        mem.messages.forEach(m => {
+          if (m.session_id === target.session_id && m.role === 'assistant' && new Date(m.created_at) > targetTime) {
+            idsToDelete.add(m.id);
+          }
+        });
+        mem.messages = mem.messages.filter(m => !idsToDelete.has(m.id));
+      } else {
+        mem.messages = mem.messages.filter(m => m.id !== id);
+      }
+    }
     saveState();
     res.json({ success: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
