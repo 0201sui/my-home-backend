@@ -1694,6 +1694,20 @@ function decodeEntities(s) {
     .replace(/&nbsp;/g, ' ').replace(/&#(\d+);/g, (m, d) => String.fromCharCode(parseInt(d, 10)));
 }
 
+// WWO 天气代码 → 中文（wttr.in 的 j1 lang_zh 实际返回英文，故用 weatherCode 映射）
+const WWO_CODE_ZH = {
+  '113': '晴', '116': '多云', '119': '阴', '122': '阴天', '143': '薄雾',
+  '176': '局部小雨', '179': '局部小雪', '182': '局部雨夹雪', '185': '局部冻雨',
+  '200': '雷暴', '227': '吹雪', '230': '暴风雪', '248': '雾', '260': '冻雾',
+  '263': '毛毛雨', '266': '小雨', '281': '冻毛毛雨', '284': '强冻毛毛雨',
+  '293': '局部小雨', '296': '小雨', '299': '中雨', '302': '中到大雨', '305': '大雨', '308': '暴雨',
+  '311': '冻雨', '314': '强冻雨', '317': '雨夹雪', '320': '中到大雨夹雪',
+  '323': '局部小雪', '326': '小雪', '329': '中雪', '332': '大雪', '335': '局部大雪', '338': '暴雪',
+  '350': '冰雹', '353': '小阵雨', '356': '中到大阵雨', '359': '暴雨', '362': '阵雨夹雪',
+  '365': '中到大阵雨夹雪', '368': '小阵雪', '371': '中到大阵雪', '374': '小冰雹', '377': '中到大冰雹',
+  '386': '雷阵雨', '389': '强雷阵雨', '392': '雷阵雪', '395': '强雷阵雪'
+};
+
 // 天气：优先用 wttr.in（免费、无需 key、Render 可直连、数据实时且准确）
 async function fetchWeather(city, query) {
   try {
@@ -1712,7 +1726,7 @@ async function fetchWeather(city, query) {
     const cur = data.current_condition && data.current_condition[0];
     const today = data.weather && data.weather[0];
     if (!cur) return null;
-    const desc = (cur.lang_zh && cur.lang_zh[0] && cur.lang_zh[0].value) || (cur.weatherDesc && cur.weatherDesc[0] && cur.weatherDesc[0].value) || '';
+    const desc = WWO_CODE_ZH[cur.weatherCode] || (cur.lang_zh && cur.lang_zh[0] && cur.lang_zh[0].value) || (cur.weatherDesc && cur.weatherDesc[0] && cur.weatherDesc[0].value) || '';
     let snippet = `${loc} 当前 ${cur.temp_C}°C（体感 ${cur.FeelsLikeC}°C），${desc}，湿度 ${cur.humidity}%，风速 ${cur.windspeedKmph}km/h。`;
     if (today) snippet += `今天最高 ${today.maxtempC}°C / 最低 ${today.mintempC}°C。`;
     return { title: `${loc} 实时天气`, snippet, url: `https://wttr.in/${encodeURIComponent(loc)}` };
