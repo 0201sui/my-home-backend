@@ -1802,29 +1802,6 @@ app.post('/search', async (req, res) => {
   res.json({ success: true, results });
 });
 
-// 临时诊断：查看 Render 出网到各数据源的原始返回（用完即删）
-app.get('/debug/net', async (req, res) => {
-  const out = {};
-  const probe = async (name, url, opts) => {
-    try {
-      const r = await fetch(url, opts);
-      const t = await r.text();
-      out[name] = { status: r.status, len: t.length, head: t.slice(0, 180) };
-    } catch (e) { out[name] = { error: e.message, cause: (e.cause && e.cause.code) || '' }; }
-  };
-  const UA = { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36' };
-  // 候选音乐源（找一个不被 Cloudflare 拦、能从 Render 美国机房访问的）
-  await probe('meting_injahow_search', 'https://api.injahow.cn/meting/?server=netease&type=search&id=' + encodeURIComponent('晴天'), UA);
-  await probe('meting_injahow_url', 'https://api.injahow.cn/meting/?server=netease&type=url&id=186016', UA);
-  await probe('ncm_vercel1', 'https://netease-cloud-music-api-gamma-lemon.vercel.app/search?keywords=' + encodeURIComponent('晴天'), UA);
-  await probe('ncm_zhousg', 'https://music-api.heheda.top/search?keywords=' + encodeURIComponent('晴天'), UA);
-  await probe('meting_qjqq', 'https://meting.qjqq.cn/?server=netease&type=search&id=' + encodeURIComponent('晴天'), UA);
-  await probe('itunes', 'https://itunes.apple.com/search?term=' + encodeURIComponent('晴天 周杰伦') + '&media=music&limit=3', UA);
-  await probe('netease_official_url', 'https://music.163.com/song/media/outer/url?id=186016', UA);
-  await probe('wttr_cn', 'https://wttr.in/' + encodeURIComponent('上海') + '?format=j1&lang=zh', { 'User-Agent': 'curl/8.0' });
-  res.json(out);
-});
-
 // ===== 一起读功能 =====
 app.post('/read/upload', async (req, res) => {
   const { session_id, title, content } = req.body;
