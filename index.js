@@ -641,16 +641,6 @@ app.post('/chat', async (req, res) => {
     const s = mem.sessions.find(s => s.id === session_id);
     if (s) s.updated_at = now.toISOString();
 
-    // 加载记忆
-    let memoryContext = '';
-    if (mem.profile?.profile_summary) {
-      memoryContext += `\n\n【用户画像】${mem.profile.profile_summary}`;
-    }
-    if (mem.memories.length > 0) {
-      const recent = [...mem.memories].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp)).slice(0, 5);
-      memoryContext += '\n\n【记忆宫殿摘要】以下是你记得的重要信息：\n' + recent.map(m => '• ' + (m.summary || '')).join('\n') + '\n';
-    }
-
     // 加载历史（文本 + 图片标记）
     const history = mem.messages.filter(m => m.session_id === session_id && m.visible).sort((a, b) => new Date(a.created_at) - new Date(b.created_at)).map(m => {
       let content = m.content || '';
@@ -662,40 +652,8 @@ app.post('/chat', async (req, res) => {
     const maxRounds = 999999; // 不限制上下文轮数，防止AI失忆
     const recentHistory = history.slice(-maxRounds);
 
-    // 中性提示词：仅保留功能指令，不注入人格/语气/性别等冗余描述
-    let sysContent = '你是AI助手，由Claude提供支持。回复自然流畅即可，可正常使用markdown格式。需要生成语音时用[voice]文字[/voice]包裹。';
-    if (memoryContext) sysContent += memoryContext;
-
-    // 条件注入简介：只有填写了才给 AI 读
-    if (mem.profile.userBio && mem.profile.userBio.trim()) {
-      sysContent += `\n\n【用户简介】${mem.profile.userName || '用户'}：${mem.profile.userBio.trim()}`;
-    }
-    if (mem.profile.aiBio && mem.profile.aiBio.trim()) {
-      sysContent += `\n\n【AI简介】${mem.profile.aiName || '裴拟'}：${mem.profile.aiBio.trim()}`;
-    }
-
-    // 时间感知（始终按北京时间 Asia/Shanghai 计算，不受服务器时区影响；AI 内心知晓，不向用户复读）
-    const shParts = new Intl.DateTimeFormat('zh-CN', {
-      timeZone: 'Asia/Shanghai',
-      year: 'numeric', month: '2-digit', day: '2-digit',
-      weekday: 'long', hour: '2-digit', minute: '2-digit', hour12: false
-    }).formatToParts(now).reduce((acc, p) => { acc[p.type] = p.value; return acc; }, {});
-    const yy = shParts.year;
-    const mo = shParts.month;
-    const dd = shParts.day;
-    const weekdayCN = '周' + shParts.weekday.replace('星期', '');
-    const hh = parseInt(shParts.hour, 10);
-    const mm = shParts.minute;
-    const period = hh < 6 ? '凌晨' : hh < 12 ? '上午' : hh < 14 ? '中午' : hh < 18 ? '下午' : '晚上';
-    const hour12 = hh % 12 === 0 ? 12 : hh % 12;
-    const naturalTime = `${yy}年${mo}月${dd}日 ${weekdayCN} ${period}${hour12}点${mm}分`;
-    sysContent += `\n\n【当前时间】${naturalTime}（北京时间）。用户问到时间时如实、简洁地回答即可。`;
-
-    // 引用功能说明（让 AI 知道可以引用 + 会被告知用户引用了什么）
-    sysContent += '\n\n【引用功能】当用户引用了某条消息，你会在用户消息开头看到「引用了XX的消息：...」，请据此回应。你也可以主动引用用户之前说的话来回应：用 [quote]你要引用的用户原话[/quote] 包裹，被引用的内容会显示在你消息气泡的上方（像微信那样）。在合适的时候（如回应用户的具体问题、延续对方的话题）使用引用会更自然贴心。';
-
-    // 播放音乐标记（让 AI 可以主动为用户放歌）
-    sysContent += '\n\n【播放音乐】如果用户想听某首歌，或者你建议用户听某首歌，请在回复中用 [music]歌名 歌手[/music] 标记（例如 [music]晴天 周杰伦[/music]）。系统会自动搜索并播放这首歌，该标记本身不会显示给用户。一次只标记一首即可。';
+    // 精简系统提示词（与 buildChatContext 一致，控制长度避免 AI 失忆）
+    let sysContent = composeSystemPrompt(session_id, req.body.music_info);
 
     const contextMessages = [{ role: 'system', content: sysContent.trim() }, ...recentHistory];
 
@@ -942,6 +900,59 @@ async function callModelStream(messages, modelName, settings, customConfig) {
   return resp;
 }
 
+// ===== 组装系统提示词（精简版：控制长度，避免占用过多上下文窗口导致 AI 失忆）=====
+function composeSystemPrompt(session_id, music_info) {
+  const now = new Date();
+  // 像朋友一样自然对话，不使用括号/引号/星号等符号，也不使用 markdown 格式符号
+  let sys = '你是AI助手，由Claude提供支持。像朋友一样自然地聊天，不要使用括号（）、引号""、方括号[]或星号*来表达动作或旁白，也不要用加粗/斜体/标题等格式符号，直接说就行。需要生成语音时用[voice]文字[/voice]包裹。';
+
+  // 用户画像（截断，控制长度）
+  if (mem.profile?.profile_summary) {
+    sys += `\n\n【用户画像】${mem.profile.profile_summary.slice(0, 200)}`;
+  }
+  // 记忆宫殿（最多3条，每条截断，避免过长）
+  if (mem.memories.length > 0) {
+    const recent = [...mem.memories].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp)).slice(0, 3);
+    const memText = recent.map(m => '• ' + (m.summary || '').slice(0, 120)).join('\n');
+    sys += '\n\n【记忆宫殿】你记得的重要信息：\n' + memText;
+  }
+  // 简介（截断）
+  if (mem.profile.userBio && mem.profile.userBio.trim()) {
+    sys += `\n\n【用户简介】${mem.profile.userName || '用户'}：${mem.profile.userBio.trim().slice(0, 150)}`;
+  }
+  if (mem.profile.aiBio && mem.profile.aiBio.trim()) {
+    sys += `\n\n【AI简介】${mem.profile.aiName || '裴拟'}：${mem.profile.aiBio.trim().slice(0, 150)}`;
+  }
+  // 时间感知（北京时间）
+  const shParts = new Intl.DateTimeFormat('zh-CN', {
+    timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit',
+    weekday: 'long', hour: '2-digit', minute: '2-digit', hour12: false
+  }).formatToParts(now).reduce((acc, p) => { acc[p.type] = p.value; return acc; }, {});
+  const yy = shParts.year, mo = shParts.month, dd = shParts.day;
+  const weekdayCN = '周' + shParts.weekday.replace('星期', '');
+  const hh = parseInt(shParts.hour, 10), mm = shParts.minute;
+  const period = hh < 6 ? '凌晨' : hh < 12 ? '上午' : hh < 14 ? '中午' : hh < 18 ? '下午' : '晚上';
+  const hour12 = hh % 12 === 0 ? 12 : hh % 12;
+  const naturalTime = `${yy}年${mo}月${dd}日 ${weekdayCN} ${period}${hour12}点${mm}分`;
+  sys += `\n\n【当前时间】${naturalTime}（北京时间）。用户问到时间时如实、简洁地回答即可。`;
+  // 引用功能（精简）
+  sys += '\n\n【引用】用户引用某条消息时，你会在其消息开头看到「引用了XX：...」，请据此回应。你也可主动引用用户之前的话：用 [quote]原话[/quote] 包裹，会显示在你气泡上方（像微信）。';
+  // 播放音乐（精简）
+  sys += '\n\n【播放音乐】想听某首歌或建议用户听歌时，用 [music]歌名 歌手[/music] 标记（如 [music]晴天 周杰伦[/music]），系统会自动搜索播放，标记不显示。一次一首。';
+  // 一起读（截断阅读内容）
+  if (mem.readings && mem.readings[session_id]) {
+    const rd = mem.readings[session_id];
+    const progress = Math.round(rd.progress || 0);
+    const contentSnippet = (rd.content || '').slice(0, 1500);
+    sys += `\n\n【一起读】用户正在阅读《${rd.title || '未命名'}》，进度约${progress}%。内容：\n${contentSnippet}\n\n可基于内容讨论。`;
+  }
+  // 正在播放
+  if (music_info && music_info.name) {
+    sys += `\n\n【正在播放】《${music_info.name}》- ${music_info.artist || '未知歌手'}${music_info.duration ? '（' + music_info.duration + '）' : ''}。可自然聊音乐。`;
+  }
+  return sys.trim();
+}
+
 // ===== 构建对话上下文（复用逻辑）=====
 function buildChatContext({ message, session_id, model, reply_to, api_url, api_key, api_model, images, file_content, temperature, max_context_rounds, auto_summarize_after, compress_keep_rounds, max_reply_tokens, music_info }) {
   const now = new Date();
@@ -959,16 +970,6 @@ function buildChatContext({ message, session_id, model, reply_to, api_url, api_k
   const quotedMsg = reply_to ? mem.messages.find(m => String(m.id) === String(reply_to)) : null;
   const quotedPreview = quotedMsg ? quotedPreviewOf(quotedMsg) : null;
 
-  // 加载记忆
-  let memoryContext = '';
-  if (mem.profile?.profile_summary) {
-    memoryContext += `\n\n【用户画像】${mem.profile.profile_summary}`;
-  }
-  if (mem.memories.length > 0) {
-    const recent = [...mem.memories].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp)).slice(0, 5);
-    memoryContext += '\n\n【记忆宫殿摘要】以下是你记得的重要信息：\n' + recent.map(m => '• ' + (m.summary || '')).join('\n') + '\n';
-  }
-
   // 加载历史
   const history = mem.messages.filter(m => m.session_id === session_id && m.visible).sort((a, b) => new Date(a.created_at) - new Date(b.created_at)).map(m => {
     let content = m.content || '';
@@ -981,47 +982,7 @@ function buildChatContext({ message, session_id, model, reply_to, api_url, api_k
   const maxRounds = 999999;
   const recentHistory = history.slice(-maxRounds);
 
-  let sysContent = '你是AI助手，由Claude提供支持。回复自然流畅即可，可正常使用markdown格式。需要生成语音时用[voice]文字[/voice]包裹。';
-  if (memoryContext) sysContent += memoryContext;
-
-  if (mem.profile.userBio && mem.profile.userBio.trim()) {
-    sysContent += `\n\n【用户简介】${mem.profile.userName || '用户'}：${mem.profile.userBio.trim()}`;
-  }
-  if (mem.profile.aiBio && mem.profile.aiBio.trim()) {
-    sysContent += `\n\n【AI简介】${mem.profile.aiName || '裴拟'}：${mem.profile.aiBio.trim()}`;
-  }
-
-  // 时间感知
-  const shParts = new Intl.DateTimeFormat('zh-CN', {
-    timeZone: 'Asia/Shanghai',
-    year: 'numeric', month: '2-digit', day: '2-digit',
-    weekday: 'long', hour: '2-digit', minute: '2-digit', hour12: false
-  }).formatToParts(now).reduce((acc, p) => { acc[p.type] = p.value; return acc; }, {});
-  const yy = shParts.year, mo = shParts.month, dd = shParts.day;
-  const weekdayCN = '周' + shParts.weekday.replace('星期', '');
-  const hh = parseInt(shParts.hour, 10), mm = shParts.minute;
-  const period = hh < 6 ? '凌晨' : hh < 12 ? '上午' : hh < 14 ? '中午' : hh < 18 ? '下午' : '晚上';
-  const hour12 = hh % 12 === 0 ? 12 : hh % 12;
-  const naturalTime = `${yy}年${mo}月${dd}日 ${weekdayCN} ${period}${hour12}点${mm}分`;
-  sysContent += `\n\n【当前时间】${naturalTime}（北京时间）。用户问到时间时如实、简洁地回答即可。`;
-
-  sysContent += '\n\n【引用功能】当用户引用了某条消息，你会在用户消息开头看到「引用了XX的消息：...」，请据此回应。你也可以主动引用用户之前说的话来回应：用 [quote]你要引用的用户原话[/quote] 包裹，被引用的内容会显示在你消息气泡的上方（像微信那样）。在合适的时候（如回应用户的具体问题、延续对方的话题）使用引用会更自然贴心。';
-
-  // 播放音乐标记（让 AI 可以主动为用户放歌）
-  sysContent += '\n\n【播放音乐】如果用户想听某首歌，或者你建议用户听某首歌，请在回复中用 [music]歌名 歌手[/music] 标记（例如 [music]晴天 周杰伦[/music]）。系统会自动搜索并播放这首歌，该标记本身不会显示给用户。一次只标记一首即可。';
-
-  // 一起读：注入阅读内容
-  if (mem.readings && mem.readings[session_id]) {
-    const rd = mem.readings[session_id];
-    const progress = Math.round(rd.progress || 0);
-    const contentSnippet = (rd.content || '').slice(0, 3000);
-    sysContent += `\n\n【一起读】用户正在阅读《${rd.title || '未命名'}》，当前阅读进度约${progress}%。以下是阅读内容（可能不完整）：\n${contentSnippet}\n\n请基于此内容与用户讨论，用户可能随时问起文中情节、人物或想法。`;
-  }
-
-  // 音乐播放：注入当前播放信息
-  if (music_info && music_info.name) {
-    sysContent += `\n\n【正在播放】用户正在听《${music_info.name}》- ${music_info.artist || '未知歌手'}。${music_info.duration ? '歌曲时长' + music_info.duration + '。' : ''}请注意用户可能在一边听歌一边聊天，可以自然地聊聊音乐相关话题。`;
-  }
+  let sysContent = composeSystemPrompt(session_id, music_info);
 
   // 文件内容注入
   let fullMessage = message || '';
