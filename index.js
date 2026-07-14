@@ -22,6 +22,7 @@ const mem = {
   sessions: [],
   messages: [],
   memories: [],
+  readings: {},
   settings: null,
   stickers: [],
   profile: { userBio: '', aiBio: '', userName: '我', aiName: '裴拟' },
@@ -42,6 +43,7 @@ function scheduleSave() {
         sessions: mem.sessions,
         messages: mem.messages,
         memories: mem.memories,
+        readings: mem.readings,
         settings: mem.settings,
         stickers: mem.stickers,
         profile: mem.profile,
@@ -58,6 +60,7 @@ function loadState() {
       mem.sessions = raw.sessions || [];
       mem.messages = raw.messages || [];
       mem.memories = raw.memories || [];
+      mem.readings = raw.readings || {};
       mem.settings = raw.settings || null;
       mem.stickers = raw.stickers || [];
       mem.profile = raw.profile || mem.profile;
@@ -113,12 +116,12 @@ function splitReplies(text) {
 const defaultSettings = {
   system_prompt: '',
   temperature: 0.7,
-  max_context_rounds: 30,
+  max_context_rounds: 250,
   compress_threshold: 4000,
   compress_keep_rounds: 15,
   max_reply_tokens: 1024,
   auto_summarize: true,
-  auto_summarize_after: 30,
+  auto_summarize_after: 50,
   delete_after_summarize: false
 };
 
@@ -377,13 +380,17 @@ app.post('/memories/compress/:sessionId', async (req, res) => {
     if (allMessages.length === 0) return res.json({ success: false, error: '没有需要总结的新消息' });
 
     const content = allMessages.map(m => `${m.role}: ${m.content}`).join('\n');
-    const summary = await callCompressModel(content, max_words || 200);
+    const summary = await callCompressModel(content, max_words || 380);
     if (!summary) return res.json({ success: false, error: '总结失败' });
+
+    // 提取关键词
+    const kwMatch = summary.match(/关键词[：:]\s*(.+)/);
+    const keywords = kwMatch ? kwMatch[1].split(/[，,、\s]+/).map(s => s.trim()).filter(Boolean).slice(0, 5) : [];
 
     const memory = {
       title: `对话总结 ${new Date().toLocaleString('zh-CN')}`,
       summary,
-      keywords: [],
+      keywords,
       timestamp: new Date().toISOString(),
       conversation_id: sessionId.toString()
     };
@@ -636,9 +643,12 @@ app.post('/chat', async (req, res) => {
 
     // 加载记忆
     let memoryContext = '';
+    if (mem.profile?.profile_summary) {
+      memoryContext += `\n\n【用户画像】${mem.profile.profile_summary}`;
+    }
     if (mem.memories.length > 0) {
       const recent = [...mem.memories].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp)).slice(0, 5);
-      memoryContext = '\n\n【记忆宫殿摘要】以下是你记得的重要信息：\n' + recent.map(m => '• ' + (m.summary || '')).join('\n') + '\n';
+      memoryContext += '\n\n【记忆宫殿摘要】以下是你记得的重要信息：\n' + recent.map(m => '• ' + (m.summary || '')).join('\n') + '\n';
     }
 
     // 加载历史（文本 + 图片标记）
@@ -649,11 +659,11 @@ app.post('/chat', async (req, res) => {
       }
       return { role: m.role, content, id: m.id };
     });
-    const maxRounds = settings.max_context_rounds * 2;
+    const maxRounds = 999999; // 不限制上下文轮数，防止AI失忆
     const recentHistory = history.slice(-maxRounds);
 
     // 极简提示词：只加功能指令 + 明确 AI 身份与模型，不堆砌人格/名字等冗余描述
-    let sysContent = '你是一个AI助手（基于 ' + resolvedModel + ' 模型运行，你清楚自己是一个AI、也知道所用模型）。\n\n' + (settings.system_prompt || '你可以用多条消息分段回复（用空行分隔每条，像微信那样；简单回复保持一条即可）。除非用户明确要求或需要表达强烈情绪，否则优先用文字回复，不要频繁使用语音；需要语音时用 [voice]文字内容[/voice] 标记。回复可以带一点自己的语气，但 emoji、颜文字、波浪号这类装饰性符号不要每句话都加、更不要刷屏。');
+    let sysContent = '你是AI助手，基于' + resolvedModel + '模型运行，用户是女性。回复用纯文字不要使用markdown语法，可用空行分段多条发送，需要语音时用[voice]文字[/voice]标记。';
     if (memoryContext) sysContent += memoryContext;
 
     // 条件注入简介：只有填写了才给 AI 读
@@ -679,7 +689,7 @@ app.post('/chat', async (req, res) => {
     const period = hh < 6 ? '凌晨' : hh < 12 ? '上午' : hh < 14 ? '中午' : hh < 18 ? '下午' : '晚上';
     const hour12 = hh % 12 === 0 ? 12 : hh % 12;
     const naturalTime = `${yy}年${mo}月${dd}日 ${weekdayCN} ${period}${hour12}点${mm}分`;
-    sysContent += `\n\n【当前时间】现在是 ${naturalTime}（这是北京时间，你内心知晓即可，不要用这段系统信息直接回复用户）。用户问时间时，用日常口吻简短回答，例如“现在快七点半啦”，不要出现“北京时间”“系统时间”这类字眼，也不要整段复述日期时间。`;
+    sysContent += `\n\n【当前时间】现在是 ${naturalTime}（这是北京时间，你内心知晓即可，不要用这段系统信息直接回复用户）。用户问时间时，用日常口吻简短回答，例如"现在快七点半啦"，不要出现"北京时间""系统时间"这类字眼，也不要整段复述日期时间。`;
 
     // 引用功能说明（让 AI 知道可以引用 + 会被告知用户引用了什么）
     sysContent += '\n\n【引用功能】当用户引用了某条消息，你会在用户消息开头看到「引用了XX的消息：...」，请据此回应。你也可以主动引用用户之前说的话来回应：用 [quote]你要引用的用户原话[/quote] 包裹，被引用的内容会显示在你消息气泡的上方（像微信那样）。在合适的时候（如回应用户的具体问题、延续对方的话题）使用引用会更自然贴心。';
@@ -713,7 +723,7 @@ app.post('/chat', async (req, res) => {
 
     // 调用模型
     const customConfig = (api_url && api_key) ? { api_url, api_key, api_model } : null;
-    const aiResponse = await callModel(contextMessages, model, settings, customConfig);
+    const { content: aiResponse, usage } = await callModel(contextMessages, model, settings, customConfig);
 
     // 智能分条：AI 用空行分隔；长文无空行时按单换行分条（合并过短续行）
     const replies = splitReplies(aiResponse);
@@ -772,7 +782,7 @@ app.post('/chat', async (req, res) => {
       }
     }
 
-    res.json({ replies: savedReplies });
+    res.json({ replies: savedReplies, usage: usage || null });
   } catch (error) {
     console.error('对话错误:', error);
     res.status(500).json({ error: error.message });
@@ -883,8 +893,672 @@ async function callModel(messages, modelName, settings, customConfig) {
 
   const data = await resp.json();
   if (!resp.ok) throw new Error(data.error?.message || 'AI调用失败');
-  return data.choices?.[0]?.message?.content || '无回复';
+  const content = data.choices?.[0]?.message?.content || '无回复';
+  const usage = data.usage || null;
+  return { content, usage };
 }
+
+// ===== 流式模型调用 =====
+async function callModelStream(messages, modelName, settings, customConfig) {
+  let apiUrl, apiKey, modelId;
+
+  if (customConfig && customConfig.api_url && customConfig.api_key) {
+    apiUrl = customConfig.api_url.replace(/\/$/, '') + '/v1/chat/completions';
+    apiKey = customConfig.api_key;
+    modelId = customConfig.api_model || modelName;
+  } else if (modelName === 'deepseek') {
+    apiUrl = 'https://api.deepseek.com/v1/chat/completions';
+    apiKey = process.env.DEEPSEEK_API_KEY;
+    modelId = 'deepseek-chat';
+  } else {
+    apiUrl = 'https://xn--vduyey89e.com/v1/chat/completions';
+    apiKey = process.env.CLAUDE_API_KEY;
+    modelId = '[特价MAX-CC]claude-sonnet-5';
+  }
+
+  if (!apiKey) throw new Error('API Key 未配置，请在API配置中设置');
+
+  const resp = await fetch(apiUrl, {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: modelId,
+      messages,
+      stream: true,
+      stream_options: { include_usage: true },
+      max_tokens: settings.max_reply_tokens || 1024,
+      temperature: settings.temperature ?? 0.7
+    })
+  });
+
+  if (!resp.ok) {
+    const errData = await resp.json().catch(() => ({}));
+    throw new Error(errData.error?.message || 'AI调用失败');
+  }
+
+  return resp;
+}
+
+// ===== 构建对话上下文（复用逻辑）=====
+function buildChatContext({ message, session_id, model, reply_to, api_url, api_key, api_model, images, file_content, temperature, max_context_rounds, auto_summarize_after, compress_keep_rounds, max_reply_tokens, music_info }) {
+  const now = new Date();
+  const resolvedModel = (model === 'deepseek') ? 'deepseek-chat' : (api_model || '[特价MAX-CC]claude-sonnet-5');
+  let settings = { ...defaultSettings };
+  if (mem.settings) settings = mem.settings;
+  // 前端传入的温度优先
+  if (typeof temperature === 'number' && !isNaN(temperature)) settings.temperature = temperature;
+  // 前端传入的 AI 参数优先
+  if (max_context_rounds) settings.max_context_rounds = max_context_rounds;
+  if (auto_summarize_after) settings.auto_summarize_after = auto_summarize_after;
+  if (compress_keep_rounds) settings.compress_keep_rounds = compress_keep_rounds;
+  if (max_reply_tokens) settings.max_reply_tokens = max_reply_tokens;
+
+  const quotedMsg = reply_to ? mem.messages.find(m => String(m.id) === String(reply_to)) : null;
+  const quotedPreview = quotedMsg ? quotedPreviewOf(quotedMsg) : null;
+
+  // 加载记忆
+  let memoryContext = '';
+  if (mem.profile?.profile_summary) {
+    memoryContext += `\n\n【用户画像】${mem.profile.profile_summary}`;
+  }
+  if (mem.memories.length > 0) {
+    const recent = [...mem.memories].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp)).slice(0, 5);
+    memoryContext += '\n\n【记忆宫殿摘要】以下是你记得的重要信息：\n' + recent.map(m => '• ' + (m.summary || '')).join('\n') + '\n';
+  }
+
+  // 加载历史
+  const history = mem.messages.filter(m => m.session_id === session_id && m.visible).sort((a, b) => new Date(a.created_at) - new Date(b.created_at)).map(m => {
+    let content = m.content || '';
+    if (m.images && m.images.length > 0) {
+      content = content + (content ? '\n' : '') + `[用户发送了${m.images.length}张图片]`;
+    }
+    return { role: m.role, content, id: m.id };
+  });
+  // 不限制上下文轮数，防止AI失忆
+  const maxRounds = 999999;
+  const recentHistory = history.slice(-maxRounds);
+
+  let sysContent = '你是AI助手，基于' + resolvedModel + '模型运行，用户是女性。回复用纯文字不要使用markdown语法，可用空行分段多条发送，需要语音时用[voice]文字[/voice]标记。';
+  if (memoryContext) sysContent += memoryContext;
+
+  if (mem.profile.userBio && mem.profile.userBio.trim()) {
+    sysContent += `\n\n【用户简介】${mem.profile.userName || '用户'}：${mem.profile.userBio.trim()}`;
+  }
+  if (mem.profile.aiBio && mem.profile.aiBio.trim()) {
+    sysContent += `\n\n【AI简介】${mem.profile.aiName || '裴拟'}：${mem.profile.aiBio.trim()}`;
+  }
+
+  // 时间感知
+  const shParts = new Intl.DateTimeFormat('zh-CN', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    weekday: 'long', hour: '2-digit', minute: '2-digit', hour12: false
+  }).formatToParts(now).reduce((acc, p) => { acc[p.type] = p.value; return acc; }, {});
+  const yy = shParts.year, mo = shParts.month, dd = shParts.day;
+  const weekdayCN = '周' + shParts.weekday.replace('星期', '');
+  const hh = parseInt(shParts.hour, 10), mm = shParts.minute;
+  const period = hh < 6 ? '凌晨' : hh < 12 ? '上午' : hh < 14 ? '中午' : hh < 18 ? '下午' : '晚上';
+  const hour12 = hh % 12 === 0 ? 12 : hh % 12;
+  const naturalTime = `${yy}年${mo}月${dd}日 ${weekdayCN} ${period}${hour12}点${mm}分`;
+  sysContent += `\n\n【当前时间】现在是 ${naturalTime}（这是北京时间，你内心知晓即可，不要用这段系统信息直接回复用户）。用户问时间时，用日常口吻简短回答，例如"现在快七点半啦"，不要出现"北京时间""系统时间"这类字眼，也不要整段复述日期时间。`;
+
+  sysContent += '\n\n【引用功能】当用户引用了某条消息，你会在用户消息开头看到「引用了XX的消息：...」，请据此回应。你也可以主动引用用户之前说的话来回应：用 [quote]你要引用的用户原话[/quote] 包裹，被引用的内容会显示在你消息气泡的上方（像微信那样）。在合适的时候（如回应用户的具体问题、延续对方的话题）使用引用会更自然贴心。';
+
+  // 一起读：注入阅读内容
+  if (mem.readings && mem.readings[session_id]) {
+    const rd = mem.readings[session_id];
+    const progress = Math.round(rd.progress || 0);
+    const contentSnippet = (rd.content || '').slice(0, 3000);
+    sysContent += `\n\n【一起读】用户正在阅读《${rd.title || '未命名'}》，当前阅读进度约${progress}%。以下是阅读内容（可能不完整）：\n${contentSnippet}\n\n请基于此内容与用户讨论，用户可能随时问起文中情节、人物或想法。`;
+  }
+
+  // 音乐播放：注入当前播放信息
+  if (music_info && music_info.name) {
+    sysContent += `\n\n【正在播放】用户正在听《${music_info.name}》- ${music_info.artist || '未知歌手'}。${music_info.duration ? '歌曲时长' + music_info.duration + '。' : ''}请注意用户可能在一边听歌一边聊天，可以自然地聊聊音乐相关话题。`;
+  }
+
+  // 文件内容注入
+  let fullMessage = message || '';
+  if (file_content) {
+    fullMessage = (fullMessage ? fullMessage + '\n\n' : '') + `【附件内容】\n${file_content}`;
+  }
+
+  const contextMessages = [{ role: 'system', content: sysContent.trim() }, ...recentHistory];
+
+  // 多模态图片
+  if (images && images.length > 0 && contextMessages.length > 0) {
+    const lastIdx = contextMessages.length - 1;
+    const lastMsg = contextMessages[lastIdx];
+    if (lastMsg && lastMsg.role === 'user') {
+      const parts = [];
+      if (fullMessage) parts.push({ type: 'text', text: fullMessage });
+      images.forEach(img => parts.push({ type: 'image_url', image_url: { url: img } }));
+      contextMessages[lastIdx] = { role: 'user', content: parts };
+    }
+  } else if (fullMessage) {
+    // 更新最后一条用户消息内容
+    const lastIdx = contextMessages.length - 1;
+    if (contextMessages[lastIdx] && contextMessages[lastIdx].role === 'user') {
+      contextMessages[lastIdx] = { role: 'user', content: fullMessage };
+    }
+  }
+
+  // 引用注入
+  if (quotedMsg) {
+    const roleName = quotedMsg.role === 'user' ? (mem.profile.userName || '用户') : (mem.profile.aiName || '裴拟');
+    for (let i = contextMessages.length - 1; i >= 0; i--) {
+      if (contextMessages[i].role === 'user') {
+        const quoteText = quotedPreviewOf(quotedMsg);
+        const base = (typeof contextMessages[i].content === 'string') ? contextMessages[i].content : (fullMessage || '');
+        contextMessages[i] = { role: 'user', content: `(引用了「${roleName}」的消息：「${quoteText}」)\n\n${base}` };
+        break;
+      }
+    }
+  }
+
+  return { contextMessages, history, settings, resolvedModel, quotedMsg, quotedPreview };
+}
+
+// ===== 保存 AI 回复（复用逻辑）=====
+async function saveAIReplies(replies, sessionId, history, tts_config) {
+  const savedReplies = [];
+  for (let i = 0; i < replies.length; i++) {
+    const replyTime = new Date().toISOString();
+    let part = replies[i];
+
+    let replyRole = null, replyContent = null, replyQuoteMsgId = null;
+    const quoteMatch = part.match(/\[quote\]([\s\S]*?)\[\/quote\]/);
+    if (quoteMatch) {
+      replyContent = quoteMatch[1].trim();
+      replyRole = 'user';
+      const qm = history.find(h => h.role === 'user' && (h.content || '').includes(replyContent));
+      replyQuoteMsgId = qm ? qm.id : null;
+      part = part.replace(/\[quote\][\s\S]*?\[\/quote\]/, '').trim();
+    }
+
+    const voiceMatch = part.match(/\[voice\]([\s\S]*?)\[\/voice\]/);
+    if (voiceMatch) {
+      const voiceText = voiceMatch[1].trim();
+      const remainingContent = part.replace(/\[voice\][\s\S]*?\[\/voice\]/, '').trim();
+      const voiceData = { text: voiceText, duration: Math.max(1, Math.ceil(voiceText.length / 4)) };
+      if (tts_config && tts_config.apiKey) {
+        try { voiceData.audio = await generateTTS(voiceText, tts_config); } catch (err) { console.error('TTS失败:', err.message); }
+      }
+      const msgContent = voiceData.audio ? remainingContent : '';
+      mem.messages.push({ id: nextId(), session_id: sessionId, role: 'assistant', content: msgContent, voice: voiceData, reply_role: replyRole, reply_content: replyContent, reply_to: replyQuoteMsgId, visible: true, created_at: replyTime, summarized: false });
+      const replyObj = { content: msgContent, created_at: replyTime, voice: voiceData };
+      if (replyRole) { replyObj.reply_role = replyRole; replyObj.reply_content = replyContent; }
+      if (replyQuoteMsgId) replyObj.reply_to = replyQuoteMsgId;
+      savedReplies.push(replyObj);
+    } else {
+      mem.messages.push({ id: nextId(), session_id: sessionId, role: 'assistant', content: part, reply_role: replyRole, reply_content: replyContent, reply_to: replyQuoteMsgId, visible: true, created_at: replyTime, summarized: false });
+      const replyObj = { content: part, created_at: replyTime };
+      if (replyRole) { replyObj.reply_role = replyRole; replyObj.reply_content = replyContent; }
+      if (replyQuoteMsgId) replyObj.reply_to = replyQuoteMsgId;
+      savedReplies.push(replyObj);
+    }
+  }
+  return savedReplies;
+}
+
+// ===== SSE 流式对话 =====
+app.post('/chat/stream', async (req, res) => {
+  const { message, session_id, model, reply_to, api_url, api_key, api_model, images, tts_config, file_content, temperature } = req.body;
+  if (!message && (!images || images.length === 0) && !file_content) return res.status(400).json({ error: '消息不能为空' });
+  if (!session_id) return res.status(400).json({ error: '缺少 session_id' });
+
+  // SSE headers
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+
+  let aborted = false;
+  res.on('close', () => { aborted = true; });
+
+  try {
+    const now = new Date();
+
+    // 保存用户消息
+    const userMsg = {
+      id: nextId(), session_id, role: 'user', content: message || '',
+      images: images || [], file_name: req.body.file_name || null,
+      visible: true, created_at: now.toISOString(),
+      reply_to: reply_to || null,
+      summarized: false
+    };
+
+    // 引用消息
+    const quotedMsg = reply_to ? mem.messages.find(m => String(m.id) === String(reply_to)) : null;
+    if (quotedMsg) {
+      userMsg.reply_role = quotedMsg.role;
+      userMsg.reply_content = quotedPreviewOf(quotedMsg);
+    }
+
+    mem.messages.push(userMsg);
+    const s = mem.sessions.find(s => s.id === session_id);
+    if (s) s.updated_at = now.toISOString();
+
+    // 构建上下文
+    const customConfig = (api_url && api_key) ? { api_url, api_key, api_model } : null;
+
+    // 发送 user message id 给前端
+    res.write(`data: ${JSON.stringify({ type: 'user_msg', id: userMsg.id })}\n\n`);
+
+    // 联网搜索检测
+    let searchContext = '';
+    if (shouldSearch(message || '', req.body.search_enabled)) {
+      res.write(`data: ${JSON.stringify({ type: 'searching' })}\n\n`);
+      const searchResults = await webSearch(message, req.body.search_city);
+      if (searchResults.length > 0) {
+        searchContext = '\n\n【联网搜索结果】以下是相关搜索结果，请参考这些信息回答用户问题：\n' +
+          searchResults.map((r, i) => `${i + 1}. ${r.title}\n   ${r.snippet}`).join('\n') + '\n';
+      }
+    }
+
+    // 构建上下文（注入搜索结果）
+    const contextBody = { ...req.body };
+    if (searchContext) {
+      contextBody.file_content = (req.body.file_content || '') + searchContext;
+    }
+    const { contextMessages, history, settings } = buildChatContext(contextBody);
+
+    // 调用模型（流式）
+    const apiResp = await callModelStream(contextMessages, model, settings, customConfig);
+
+    const reader = apiResp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let fullText = '';
+    let usage = null;
+
+    while (true) {
+      if (aborted) break;
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop();
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed || !trimmed.startsWith('data: ')) continue;
+        const dataStr = trimmed.slice(6);
+        if (dataStr === '[DONE]') continue;
+
+        try {
+          const parsed = JSON.parse(dataStr);
+          const delta = parsed.choices?.[0]?.delta?.content;
+          if (delta) {
+            fullText += delta;
+            if (!aborted) {
+              res.write(`data: ${JSON.stringify({ type: 'delta', content: delta })}\n\n`);
+            }
+          }
+          if (parsed.usage) {
+            usage = parsed.usage;
+          }
+        } catch (e) { /* skip invalid JSON */ }
+      }
+    }
+
+    // 如果被中止，保存已收到的部分
+    if (aborted && fullText) {
+      fullText += '\n\n[生成已被用户停止]';
+    }
+
+    if (!fullText.trim()) {
+      fullText = '抱歉，未能生成回复。';
+    }
+
+    // 智能分条并保存
+    const replies = splitReplies(fullText);
+    const savedReplies = await saveAIReplies(replies, session_id, history, tts_config);
+
+    // 自动总结
+    if (settings.auto_summarize && !aborted) {
+      const unsummarized = mem.messages.filter(m => m.session_id === session_id && m.visible && !m.summarized);
+      if (unsummarized.length >= (settings.auto_summarize_after || 10) * 2) {
+        await autoCompress(session_id, settings);
+      }
+    }
+
+    // 发送最终结果
+    res.write(`data: ${JSON.stringify({ type: 'done', replies: savedReplies, usage })}\n\n`);
+    res.end();
+  } catch (error) {
+    console.error('流式对话错误:', error);
+    try {
+      res.write(`data: ${JSON.stringify({ type: 'error', error: error.message })}\n\n`);
+      res.end();
+    } catch (e) { /* connection already closed */ }
+  }
+});
+
+// ===== 重新生成 =====
+app.post('/chat/regenerate', async (req, res) => {
+  const { session_id, model, api_url, api_key, api_model, tts_config, temperature } = req.body;
+  if (!session_id) return res.status(400).json({ error: '缺少 session_id' });
+
+  // SSE headers
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+
+  let aborted = false;
+  res.on('close', () => { aborted = true; });
+
+  try {
+    // 找到该会话所有可见消息
+    const sessionMsgs = mem.messages.filter(m => m.session_id === session_id && m.visible).sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+
+    // 找到最后一条用户消息
+    let lastUserIdx = -1;
+    for (let i = sessionMsgs.length - 1; i >= 0; i--) {
+      if (sessionMsgs[i].role === 'user') { lastUserIdx = i; break; }
+    }
+    if (lastUserIdx === -1) return res.status(400).json({ error: '没有找到用户消息' });
+
+    const lastUserMsg = sessionMsgs[lastUserIdx];
+
+    // 删除该用户消息之后的所有 AI 消息
+    const toDelete = sessionMsgs.slice(lastUserIdx + 1).filter(m => m.role === 'assistant');
+    const deleteIds = new Set(toDelete.map(m => m.id));
+    mem.messages = mem.messages.filter(m => !deleteIds.has(m.id));
+
+    // 用最后一条用户消息重建上下文（但不重新保存用户消息）
+    const { contextMessages, history, settings } = buildChatContext({
+      message: lastUserMsg.content,
+      session_id,
+      model,
+      reply_to: lastUserMsg.reply_to,
+      api_url, api_key, api_model,
+      images: lastUserMsg.images || [],
+      file_content: null,
+      temperature,
+      max_context_rounds: req.body.max_context_rounds,
+      auto_summarize_after: req.body.auto_summarize_after,
+      compress_keep_rounds: req.body.compress_keep_rounds,
+      max_reply_tokens: req.body.max_reply_tokens,
+      music_info: req.body.music_info
+    });
+
+    const customConfig = (api_url && api_key) ? { api_url, api_key, api_model } : null;
+
+    // 联网搜索检测
+    let searchContext = '';
+    if (shouldSearch(lastUserMsg.content || '', req.body.search_enabled)) {
+      res.write(`data: ${JSON.stringify({ type: 'searching' })}\n\n`);
+      const searchResults = await webSearch(lastUserMsg.content, req.body.search_city);
+      if (searchResults.length > 0) {
+        searchContext = '\n\n【联网搜索结果】以下是相关搜索结果，请参考这些信息回答用户问题：\n' +
+          searchResults.map((r, i) => `${i + 1}. ${r.title}\n   ${r.snippet}`).join('\n') + '\n';
+      }
+    }
+    // 如果有搜索结果，注入到上下文
+    if (searchContext) {
+      for (let i = contextMessages.length - 1; i >= 0; i--) {
+        if (contextMessages[i].role === 'user') {
+          const base = (typeof contextMessages[i].content === 'string') ? contextMessages[i].content : '';
+          contextMessages[i] = { role: 'user', content: base + searchContext };
+          break;
+        }
+      }
+    }
+
+    // 调用模型（流式）
+    const apiResp = await callModelStream(contextMessages, model, settings, customConfig);
+    const reader = apiResp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let fullText = '';
+    let usage = null;
+
+    while (true) {
+      if (aborted) break;
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop();
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed || !trimmed.startsWith('data: ')) continue;
+        const dataStr = trimmed.slice(6);
+        if (dataStr === '[DONE]') continue;
+        try {
+          const parsed = JSON.parse(dataStr);
+          const delta = parsed.choices?.[0]?.delta?.content;
+          if (delta) {
+            fullText += delta;
+            if (!aborted) res.write(`data: ${JSON.stringify({ type: 'delta', content: delta })}\n\n`);
+          }
+          if (parsed.usage) usage = parsed.usage;
+        } catch (e) { /* skip */ }
+      }
+    }
+
+    if (aborted && fullText) fullText += '\n\n[生成已被用户停止]';
+    if (!fullText.trim()) fullText = '抱歉，未能生成回复。';
+
+    const replies = splitReplies(fullText);
+    const savedReplies = await saveAIReplies(replies, session_id, history, tts_config);
+
+    res.write(`data: ${JSON.stringify({ type: 'done', replies: savedReplies, usage })}\n\n`);
+    res.end();
+  } catch (error) {
+    console.error('重新生成错误:', error);
+    try {
+      res.write(`data: ${JSON.stringify({ type: 'error', error: error.message })}\n\n`);
+      res.end();
+    } catch (e) { /* connection closed */ }
+  }
+});
+
+// ===== 只保存用户消息（分段发送模式，不触发 AI 回复）=====
+app.post('/messages/send', async (req, res) => {
+  const { message, session_id, images, reply_to, file_content, file_name } = req.body;
+  if (!message && (!images || images.length === 0) && !file_content) return res.status(400).json({ error: '消息不能为空' });
+  if (!session_id) return res.status(400).json({ error: '缺少 session_id' });
+
+  try {
+    const now = new Date();
+    const userMsg = {
+      id: nextId(), session_id, role: 'user', content: message || '',
+      images: images || [], file_name: file_name || null,
+      visible: true, created_at: now.toISOString(),
+      reply_to: reply_to || null,
+      summarized: false
+    };
+
+    const quotedMsg = reply_to ? mem.messages.find(m => String(m.id) === String(reply_to)) : null;
+    if (quotedMsg) {
+      userMsg.reply_role = quotedMsg.role;
+      userMsg.reply_content = quotedPreviewOf(quotedMsg);
+    }
+
+    mem.messages.push(userMsg);
+    const s = mem.sessions.find(s => s.id === session_id);
+    if (s) s.updated_at = now.toISOString();
+
+    res.json({ success: true, message: userMsg });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ===== 触发 AI 回复（分段发送后，用户点"让AI回复"触发）=====
+app.post('/chat/respond', async (req, res) => {
+  const { session_id, model, api_url, api_key, api_model, tts_config, temperature, max_context_rounds, auto_summarize_after, compress_keep_rounds, max_reply_tokens } = req.body;
+  if (!session_id) return res.status(400).json({ error: '缺少 session_id' });
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+
+  let aborted = false;
+  res.on('close', () => { aborted = true; });
+
+  try {
+    const sessionMsgs = mem.messages.filter(m => m.session_id === session_id && m.visible).sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+    if (sessionMsgs.length === 0) return res.status(400).json({ error: '没有消息可以回复' });
+
+    // 找到最后一条用户消息
+    let lastUserIdx = -1;
+    for (let i = sessionMsgs.length - 1; i >= 0; i--) {
+      if (sessionMsgs[i].role === 'user') { lastUserIdx = i; break; }
+    }
+    if (lastUserIdx === -1) return res.status(400).json({ error: '没有找到用户消息' });
+
+    const lastUserMsg = sessionMsgs[lastUserIdx];
+
+    // 用最后一条用户消息重建上下文（不重新保存用户消息）
+    const { contextMessages, history, settings } = buildChatContext({
+      message: lastUserMsg.content,
+      session_id,
+      model,
+      reply_to: lastUserMsg.reply_to,
+      api_url, api_key, api_model,
+      images: lastUserMsg.images || [],
+      file_content: null,
+      temperature,
+      max_context_rounds,
+      auto_summarize_after,
+      compress_keep_rounds,
+      max_reply_tokens,
+      music_info: req.body.music_info
+    });
+
+    const customConfig = (api_url && api_key) ? { api_url, api_key, api_model } : null;
+
+    // 联网搜索检测
+    let searchContext = '';
+    if (shouldSearch(lastUserMsg.content || '', req.body.search_enabled)) {
+      res.write(`data: ${JSON.stringify({ type: 'searching' })}\n\n`);
+      const searchResults = await webSearch(lastUserMsg.content, req.body.search_city);
+      if (searchResults.length > 0) {
+        searchContext = '\n\n【联网搜索结果】以下是相关搜索结果，请参考这些信息回答用户问题：\n' +
+          searchResults.map((r, i) => `${i + 1}. ${r.title}\n   ${r.snippet}`).join('\n') + '\n';
+      }
+    }
+
+    // 如果有搜索结果，注入到上下文
+    if (searchContext) {
+      for (let i = contextMessages.length - 1; i >= 0; i--) {
+        if (contextMessages[i].role === 'user') {
+          const base = (typeof contextMessages[i].content === 'string') ? contextMessages[i].content : '';
+          contextMessages[i] = { role: 'user', content: base + searchContext };
+          break;
+        }
+      }
+    }
+
+    const apiResp = await callModelStream(contextMessages, model, settings, customConfig);
+    const reader = apiResp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let fullText = '';
+    let usage = null;
+
+    while (true) {
+      if (aborted) break;
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop();
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed || !trimmed.startsWith('data: ')) continue;
+        const dataStr = trimmed.slice(6);
+        if (dataStr === '[DONE]') continue;
+        try {
+          const parsed = JSON.parse(dataStr);
+          const delta = parsed.choices?.[0]?.delta?.content;
+          if (delta) {
+            fullText += delta;
+            if (!aborted) res.write(`data: ${JSON.stringify({ type: 'delta', content: delta })}\n\n`);
+          }
+          if (parsed.usage) usage = parsed.usage;
+        } catch (e) { /* skip */ }
+      }
+    }
+
+    if (aborted && fullText) fullText += '\n\n[生成已被用户停止]';
+    if (!fullText.trim()) fullText = '抱歉，未能生成回复。';
+
+    const replies = splitReplies(fullText);
+    const savedReplies = await saveAIReplies(replies, session_id, history, tts_config);
+
+    // 自动总结
+    if (settings.auto_summarize && !aborted) {
+      const unsummarized = mem.messages.filter(m => m.session_id === session_id && m.visible && !m.summarized);
+      if (unsummarized.length >= (settings.auto_summarize_after || 10) * 2) {
+        await autoCompress(session_id, settings);
+      }
+    }
+
+    res.write(`data: ${JSON.stringify({ type: 'done', replies: savedReplies, usage })}\n\n`);
+    res.end();
+  } catch (error) {
+    console.error('触发回复错误:', error);
+    try {
+      res.write(`data: ${JSON.stringify({ type: 'error', error: error.message })}\n\n`);
+      res.end();
+    } catch (e) { /* connection closed */ }
+  }
+});
+
+// ===== Markdown 导出 =====
+app.get('/export/chat/:id/markdown', async (req, res) => {
+  try {
+    const { id } = req.params;
+    let session, messages;
+    if (useSupabase) {
+      const { data: s } = await supabase.from('sessions').select('*').eq('id', id).single();
+      const { data: msgs } = await supabase.from('messages').select('*').eq('session_id', id).eq('visible', true).order('created_at', { ascending: true });
+      session = s; messages = msgs || [];
+    } else {
+      session = mem.sessions.find(s => s.id === id);
+      messages = mem.messages.filter(m => m.session_id === id && m.visible).sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+    }
+
+    const sessionName = session?.name || '未命名对话';
+    let md = `# ${sessionName}\n\n`;
+    md += `> 导出时间：${new Date().toLocaleString('zh-CN')}\n\n---\n\n`;
+
+    for (const m of messages) {
+      const time = new Date(m.created_at).toLocaleString('zh-CN');
+      const speaker = m.role === 'user' ? (mem.profile.userName || '我') : (mem.profile.aiName || '裴拟');
+      md += `### ${speaker}  _${time}_\n\n`;
+
+      if (m.voice) {
+        md += `**[语音消息]** ${m.voice.text || ''}\n\n`;
+        if (m.content) md += `${m.content}\n\n`;
+      } else if (m.images && m.images.length > 0) {
+        if (m.content) md += `${m.content}\n\n`;
+        for (const img of m.images) {
+          md += `![图片](${img})\n\n`;
+        }
+      } else {
+        md += `${m.content || ''}\n\n`;
+      }
+
+      if (m.reply_content) {
+        md = md.slice(0, md.lastIndexOf('###')) + `> **引用:** ${m.reply_content}\n\n` + md.slice(md.lastIndexOf('###'));
+      }
+
+      md += `---\n\n`;
+    }
+
+    res.setHeader('Content-Type', 'text/markdown; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(sessionName)}.md"`);
+    res.send(md);
+  } catch (err) { res.status(500).json({ success: false, error: err.message }); }
+});
 
 async function callCompressModel(content, maxWords) {
   const apiKey = process.env.DEEPSEEK_API_KEY || process.env.CLAUDE_API_KEY;
@@ -893,16 +1567,24 @@ async function callCompressModel(content, maxWords) {
     : 'https://xn--vduyey89e.com/v1/chat/completions';
   const model = process.env.DEEPSEEK_API_KEY ? 'deepseek-chat' : '[特价MAX-CC]claude-sonnet-5';
 
+  const now = new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
+
+  const structuredPrompt = `请严格按以下格式总结本次对话，不要遗漏关键信息：
+时间：${now}
+关键词：3-5个，逗号分隔
+内容：2-3句话说清楚聊了什么、有什么结论/进展
+要求：优先保证逻辑通顺，字数控制在${maxWords || 380}字以内，不要为了凑字数而跳跃表达。用第三人称描述。`;
+
   const resp = await fetch(apiUrl, {
     method: 'POST',
     headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({
       model,
       messages: [
-        { role: 'system', content: `你是一个记忆压缩助手。请将以下对话内容压缩成一段简短的摘要，保留关键信息、情感和重要细节。用第三人称描述。控制在${maxWords || 200}字以内。` },
+        { role: 'system', content: structuredPrompt },
         { role: 'user', content }
       ],
-      stream: false, max_tokens: 500, temperature: 0.3
+      stream: false, max_tokens: 600, temperature: 0.3
     })
   });
 
@@ -919,17 +1601,290 @@ async function autoCompress(sessionId, settings) {
 
     const toCompress = allMessages.slice(0, allMessages.length - keepCount);
     const content = toCompress.map(m => `${m.role}: ${m.content}`).join('\n');
-    const summary = await callCompressModel(content, 200);
+    const summary = await callCompressModel(content, 380);
     if (!summary) return;
 
-    mem.memories.push({ id: nextId(), title: `自动总结 ${new Date().toLocaleString('zh-CN')}`, summary, keywords: [], timestamp: new Date().toISOString(), conversation_id: sessionId.toString() });
+    // 提取关键词
+    const kwMatch = summary.match(/关键词[：:]\s*(.+)/);
+    const keywords = kwMatch ? kwMatch[1].split(/[，,、\s]+/).map(s => s.trim()).filter(Boolean).slice(0, 5) : [];
+
+    mem.memories.push({ id: nextId(), title: `自动总结 ${new Date().toLocaleString('zh-CN')}`, summary, keywords, timestamp: new Date().toISOString(), conversation_id: sessionId.toString() });
     const ids = new Set(toCompress.map(m => m.id));
     if (settings.delete_after_summarize) { mem.messages = mem.messages.filter(m => !ids.has(m.id)); }
     else { mem.messages.forEach(m => { if (ids.has(m.id)) m.summarized = true; }); }
+
+    // 更新画像摘要
+    await updateProfileSummary(sessionId, content);
+
     saveState();
     console.log(`自动总结完成，处理了 ${toCompress.length} 条消息`);
   } catch (err) { console.error('自动总结出错:', err); }
 }
+
+// ===== 画像摘要（固定文本，每次总结后更新，~100字）=====
+async function updateProfileSummary(sessionId, recentContent) {
+  try {
+    const apiKey = process.env.DEEPSEEK_API_KEY || process.env.CLAUDE_API_KEY;
+    const apiUrl = process.env.DEEPSEEK_API_KEY
+      ? 'https://api.deepseek.com/v1/chat/completions'
+      : 'https://xn--vduyey89e.com/v1/chat/completions';
+    const model = process.env.DEEPSEEK_API_KEY ? 'deepseek-chat' : '[特价MAX-CC]claude-sonnet-5';
+
+    const existingSummary = mem.profile?.profile_summary || '';
+    const prompt = existingSummary
+      ? `根据以下信息更新用户画像摘要（100字以内）。现有画像：${existingSummary}\n\n新对话内容：${recentContent}\n\n请输出更新后的画像摘要，包含：用户是谁、在做什么项目、目前进展到哪。直接输出摘要文本，不要加标题。`
+      : `根据以下对话内容，生成一份用户画像摘要（100字以内），包含：用户是谁、在做什么项目、目前进展到哪。直接输出摘要文本，不要加标题。\n\n对话内容：${recentContent}`;
+
+    const resp = await fetch(apiUrl, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model,
+        messages: [{ role: 'system', content: prompt }],
+        stream: false, max_tokens: 200, temperature: 0.3
+      })
+    });
+    const data = await resp.json();
+    const newSummary = data.choices?.[0]?.message?.content?.trim();
+    if (newSummary) {
+      if (!mem.profile) mem.profile = {};
+      mem.profile.profile_summary = newSummary;
+      saveState();
+      console.log('画像摘要已更新');
+    }
+  } catch (err) { console.error('更新画像摘要出错:', err); }
+}
+
+// ===== 联网搜索 =====
+function shouldSearch(message, searchEnabled) {
+  // 如果前端明确关闭了搜索，则不搜索
+  if (searchEnabled === false) return false;
+  const keywords = ['天气', '新闻', '今天', '最新', '现在', '目前', '最近', '当前', '实时', '比分', '股价', '汇率', '油价', '热搜', '发生了什么', '什么时候', '多少钱', '价格', '排名', '排行榜'];
+  const lower = message.toLowerCase();
+  return keywords.some(kw => lower.includes(kw));
+}
+
+async function webSearch(query, city) {
+  try {
+    // 如果是天气相关查询且有城市，在查询中加入城市名
+    let searchQuery = query;
+    if (city && (query.includes('天气') || query.includes('气温') || query.includes('温度'))) {
+      searchQuery = `${city} ${query}`;
+    }
+    // 使用 DuckDuckGo Instant Answer API
+    const ddgUrl = `https://api.duckduckgo.com/?q=${encodeURIComponent(searchQuery)}&format=json&no_html=1&skip_disambig=1&no_redirect=1`;
+    const ddgResp = await fetch(ddgUrl);
+    const ddgData = await ddgResp.json();
+
+    let results = [];
+
+    // 优先用 AbstractText
+    if (ddgData.AbstractText) {
+      results.push({ title: ddgData.Heading || query, snippet: ddgData.AbstractText, url: ddgData.AbstractURL || '' });
+    }
+
+    // RelatedTopics
+    if (ddgData.RelatedTopics && ddgData.RelatedTopics.length > 0) {
+      for (const t of ddgData.RelatedTopics.slice(0, 5)) {
+        if (t.Text) {
+          results.push({ title: t.Text.slice(0, 60), snippet: t.Text, url: t.FirstURL || '' });
+        }
+        if (t.Topics && t.Topics.length > 0) {
+          for (const sub of t.Topics.slice(0, 2)) {
+            if (sub.Text) results.push({ title: sub.Text.slice(0, 60), snippet: sub.Text, url: sub.FirstURL || '' });
+          }
+        }
+      }
+    }
+
+    // Answer
+    if (ddgData.Answer) {
+      results.unshift({ title: '直接回答', snippet: ddgData.Answer, url: '' });
+    }
+
+    // 如果 DuckDuckGo 没结果，尝试 Wikipedia API
+    if (results.length === 0) {
+      const wikiUrl = `https://zh.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(query)}&format=json&srlimit=3`;
+      const wikiResp = await fetch(wikiUrl);
+      const wikiData = await wikiResp.json();
+      if (wikiData.query?.search) {
+        for (const item of wikiData.query.search) {
+          const snippet = item.snippet?.replace(/<[^>]+>/g, '') || '';
+          results.push({ title: item.title, snippet, url: `https://zh.wikipedia.org/wiki/${encodeURIComponent(item.title)}` });
+        }
+      }
+    }
+
+    return results.slice(0, 6);
+  } catch (err) {
+    console.error('搜索失败:', err.message);
+    return [];
+  }
+}
+
+app.post('/search', async (req, res) => {
+  const { query } = req.body;
+  if (!query) return res.status(400).json({ error: '缺少搜索关键词' });
+  const results = await webSearch(query);
+  res.json({ success: true, results });
+});
+
+// ===== 一起读功能 =====
+app.post('/read/upload', async (req, res) => {
+  const { session_id, title, content } = req.body;
+  if (!session_id) return res.status(400).json({ error: '缺少 session_id' });
+  if (!content) return res.status(400).json({ error: '缺少文件内容' });
+  try {
+    mem.readings[session_id] = {
+      title: title || '未命名文档',
+      content,
+      progress: 0,
+      uploadedAt: new Date().toISOString()
+    };
+    saveState();
+    res.json({ success: true, data: { title: mem.readings[session_id].title, contentLength: content.length } });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/read/content/:sessionId', async (req, res) => {
+  const { sessionId } = req.params;
+  const reading = mem.readings[sessionId];
+  if (!reading) return res.json({ success: true, data: null });
+  res.json({ success: true, data: reading });
+});
+
+app.put('/read/progress/:sessionId', async (req, res) => {
+  const { sessionId } = req.params;
+  const { progress } = req.body;
+  if (!mem.readings[sessionId]) return res.status(404).json({ error: '未找到阅读内容' });
+  mem.readings[sessionId].progress = progress;
+  saveState();
+  res.json({ success: true });
+});
+
+app.delete('/read/:sessionId', async (req, res) => {
+  const { sessionId } = req.params;
+  delete mem.readings[sessionId];
+  saveState();
+  res.json({ success: true });
+});
+
+// ===== 音乐搜索与播放 =====
+app.post('/music/search', async (req, res) => {
+  const { keyword } = req.body;
+  if (!keyword) return res.status(400).json({ error: '缺少搜索关键词' });
+  try {
+    // 使用网易云搜索API (POST with form data)
+    const params = new URLSearchParams({
+      s: keyword,
+      type: '1',
+      offset: '0',
+      total: 'true',
+      limit: '15'
+    });
+    const resp = await fetch('https://music.163.com/api/search/get', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Referer': 'https://music.163.com',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+      },
+      body: params.toString()
+    });
+    const text = await resp.text();
+    let data;
+    try { data = JSON.parse(text); } catch { data = {}; }
+    let songs = (data.result?.songs || []).map(s => ({
+      id: s.id,
+      name: s.name,
+      artist: (s.artists || []).map(a => a.name).join(' / '),
+      album: s.album?.name || '',
+      duration: s.duration || 0
+    }));
+    // 如果没结果，尝试备用搜索
+    if (songs.length === 0) {
+      const altResp = await fetch(`https://music.163.com/api/search/pc?s=${encodeURIComponent(keyword)}&type=1&offset=0&limit=15`, {
+        method: 'GET',
+        headers: {
+          'Referer': 'https://music.163.com',
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+      });
+      const altData = await altResp.json();
+      songs = (altData.result?.songs || []).map(s => ({
+        id: s.id,
+        name: s.name,
+        artist: (s.artists || []).map(a => a.name).join(' / '),
+        album: s.album?.name || '',
+        duration: s.duration || 0
+      }));
+    }
+    res.json({ success: true, songs });
+  } catch (err) {
+    console.error('音乐搜索失败:', err.message);
+    res.status(500).json({ error: '搜索失败: ' + err.message });
+  }
+});
+
+app.get('/music/detail/:id', async (req, res) => {
+  const { id } = req.params;
+  try {
+    const detailUrl = `https://music.163.com/api/song/detail/?ids=[${id}]`;
+    const resp = await fetch(detailUrl, {
+      headers: { 'Referer': 'https://music.163.com', 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
+    });
+    const data = await resp.json();
+    const song = data.songs?.[0];
+    if (!song) return res.json({ success: false, error: '未找到歌曲' });
+    res.json({
+      success: true,
+      data: {
+        id: song.id,
+        name: song.name,
+        artist: (song.artists || []).map(a => a.name).join(' / '),
+        album: song.album?.name || '',
+        cover: song.album?.picUrl || '',
+        duration: song.duration || 0
+      }
+    });
+  } catch (err) {
+    res.status(500).json({ error: '获取详情失败: ' + err.message });
+  }
+});
+
+app.get('/music/lyric/:id', async (req, res) => {
+  const { id } = req.params;
+  try {
+    const lyricUrl = `https://music.163.com/api/song/lyric?id=${id}&lv=1&kv=1&tv=-1`;
+    const resp = await fetch(lyricUrl, {
+      headers: { 'Referer': 'https://music.163.com', 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
+    });
+    const data = await resp.json();
+    res.json({ success: true, lyric: data.lrc?.lyric || '', tlyric: data.tlyric?.lyric || '' });
+  } catch (err) {
+    res.json({ success: true, lyric: '' });
+  }
+});
+
+app.get('/music/url/:id', async (req, res) => {
+  const { id } = req.params;
+  try {
+    const urlApi = `https://music.163.com/api/song/enhance/player/url/v1?ids=[${id}]&level=standard&encodeType=mp3`;
+    const resp = await fetch(urlApi, {
+      headers: { 'Referer': 'https://music.163.com', 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
+    });
+    const data = await resp.json();
+    const songData = data.data?.[0];
+    if (songData && songData.url) {
+      res.json({ success: true, url: songData.url });
+    } else {
+      // Fallback: try outer URL
+      res.json({ success: true, url: `https://music.163.com/song/media/outer/url?id=${id}.mp3` });
+    }
+  } catch (err) {
+    res.json({ success: true, url: `https://music.163.com/song/media/outer/url?id=${id}.mp3` });
+  }
+});
 
 loadState();
 
