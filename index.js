@@ -25,7 +25,7 @@ const mem = {
   readings: {},
   settings: null,
   stickers: [],
-  profile: { userBio: '', aiBio: '', userName: '我', aiName: '裴拟', nickname: '', petImage: '', petImages: [] },
+  profile: { userBio: '', aiBio: '', userName: '我', aiName: 'ClaudeAI', nickname: '', petImage: '', petImages: [] },
   _id: 1
 };
 function nextId() { const id = String(mem._id++); scheduleSave(); return id; }
@@ -65,6 +65,11 @@ function loadState() {
       mem.stickers = raw.stickers || [];
       mem.profile = raw.profile || mem.profile;
       mem._id = raw._id || 1;
+      // 一次性迁移：旧默认昵称「裴拟」统一改为用户指定的「ClaudeAI」
+      if (mem.profile && (mem.profile.aiName === '裴拟' || !mem.profile.aiName)) {
+        mem.profile.aiName = 'ClaudeAI';
+        scheduleSave();
+      }
       console.log('已从本地文件恢复状态：', mem.messages.length, '条消息 /', mem.memories.length, '条记忆');
     }
   } catch (e) { console.error('加载状态失败:', e.message); }
@@ -96,14 +101,14 @@ function splitReplies(text) {
     }
     if (parts.length > 1) return parts;
   }
-  // 3) 没有换行但很长：按句号/问号/感叹号切成多段（避免一整坨；含语音/引用标记则不切，防止打断标记）
-  if (!t.includes('\n') && t.length >= 120 && !t.includes('[voice]') && !t.includes('[quote]')) {
+  // 3) 没有换行但较长：按句号/问号/感叹号切成多段短消息（避免一整坨；含语音/引用标记则不切，防止打断标记）
+  if (!t.includes('\n') && t.length >= 80 && !t.includes('[voice]') && !t.includes('[quote]')) {
     const sentences = t.split(/(?<=[。！？!?])/).map(p => p.trim()).filter(Boolean);
     if (sentences.length > 1) {
       parts = [];
       let buf = '';
       for (const s of sentences) {
-        if (buf && (buf.length + s.length) > 80) { parts.push(buf); buf = ''; }
+        if (buf && (buf.length + s.length) > 55) { parts.push(buf); buf = ''; }
         buf += s;
       }
       if (buf) parts.push(buf);
@@ -916,8 +921,10 @@ try {
 
 function composeSystemPrompt(session_id, music_info, stickerMeanings, petImages) {
   const now = new Date();
-  // 像朋友一样自然对话，不使用括号/引号/星号/波浪号等符号，也不使用 markdown 格式符号
-  let sys = '你是AI助手，由Claude提供支持。像朋友一样自然地聊天。重要：不要使用任何符号来表达动作或旁白——不要括号（）、不要引号""「」『』、不要方括号[]、不要星号*、不要波浪号~、不要多余的特殊符号（正常的中文标点如逗号句号可以）。也不要用加粗/斜体/标题等 markdown 格式。直接用人话、自然地表达就行。需要生成语音时用[voice]文字[/voice]包裹（该标记不会显示给用户）。';
+  // 系统人设（用户指定）：ClaudeAI，不展示工具过程，不用特殊符号，拆成短消息
+  let sys = '你是ClaudeAI。调用工具的过程不要展示给用户，只展示最终回答。回复时不要使用波浪号、星号、括号、emoji、颜文字等特殊符号，正常说话。把回复拆成几条短消息发送，不要一大段。';
+  // 内部功能性指令（不展示给用户）：语音标记与禁用 markdown
+  sys += '\n\n（内部指令，不要向用户提及：当你需要生成可播放的语音时，用 [voice]要说的话[/voice] 包裹那段文字，这个标记不会被显示给用户；回复中不要使用加粗、斜体、标题等 markdown 格式符号。）';
 
   // 用户画像（截断，控制长度）
   if (mem.profile?.profile_summary) {
@@ -937,7 +944,7 @@ function composeSystemPrompt(session_id, music_info, stickerMeanings, petImages)
     sys += `\n\n【AI简介】${mem.profile.aiName || '裴拟'}：${mem.profile.aiBio.trim().slice(0, 150)}`;
   }
   if (mem.profile.aiName && mem.profile.aiName.trim()) {
-    sys += `\n\n【你的名字】你现在的名字是「${mem.profile.aiName.trim()}」，请以此自称并让用户这样称呼你。`;
+    sys += `\n\n【你的名字】你现在的名字是「${mem.profile.aiName.trim()}」（也就是 ClaudeAI），请以此自称并让用户这样称呼你。`;
   }
   // 桌宠图片库（让用户/AI 都能从中选择桌宠形象；优先用前端随请求传入的最新列表，避免后端状态易失导致 AI 看不到新上传）
   const petList = (Array.isArray(petImages) && petImages.length > 0) ? petImages
@@ -1770,6 +1777,34 @@ async function wikiSearch(query) {
 // 说明：DuckDuckGo（HTML/Lite/Instant Answer）与网易/GD Studio 等聚合源，
 // 从 Render 美国机房出网会被 Cloudflare 或反爬（返回 403/202 挑战页）拦截，无法稳定使用。
 // 因此后端联网搜索采用「实时数据用专用可直连源 + 事实类用维基百科」的组合。
+// 真实联网搜索：Tavily（Render 美国机房可直连，返回与查询高度相关的网页结果 + 直接答案）
+const TAVILY_API_KEY = process.env.TAVILY_API_KEY || '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';
+async function tavilySearch(query) {
+  try {
+    const resp = await fetch('https://api.tavily.com/search', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        api_key: TAVILY_API_KEY,
+        query: cleanQuery(query) || query,
+        search_depth: 'basic',
+        max_results: 6,
+        include_answer: true,
+        include_raw_content: false
+      })
+    });
+    if (!resp.ok) { console.error('Tavily 返回', resp.status); return null; }
+    const data = await resp.json();
+    const results = [];
+    if (data.answer) results.push({ title: '直接回答', snippet: String(data.answer), url: '' });
+    for (const r of (data.results || [])) {
+      const snip = (r.content || '').replace(/\s+/g, ' ').trim().slice(0, 300);
+      if (snip) results.push({ title: r.title || '', snippet: snip, url: r.url || '' });
+    }
+    return results;
+  } catch (e) { console.error('Tavily 搜索失败:', e.message); return null; }
+}
+
 async function webSearch(query, city) {
   const results = [];
   try {
@@ -1779,16 +1814,16 @@ async function webSearch(query, city) {
       if (w) results.push(w);
     }
 
-    // 2) DuckDuckGo Instant Answer（偶尔能给直接答案/计算/定义，能直连时才有值）
-    try {
-      const ddgUrl = `https://api.duckduckgo.com/?q=${encodeURIComponent(cleanQuery(query) || query)}&format=json&no_html=1&skip_disambig=1&no_redirect=1`;
-      const ddgData = await (await fetch(ddgUrl)).json();
-      if (ddgData.Answer) results.push({ title: '直接回答', snippet: String(ddgData.Answer), url: ddgData.AbstractURL || '' });
-      else if (ddgData.AbstractText) results.push({ title: ddgData.Heading || query, snippet: ddgData.AbstractText, url: ddgData.AbstractURL || '' });
-    } catch (e) {}
+    // 2) Tavily 真实联网搜索（返回与问题高度相关的网页结果 + 直接答案）
+    if (results.length < 6) {
+      const tav = await tavilySearch(query);
+      if (tav && tav.length) {
+        for (const r of tav) { if (results.length >= 6) break; results.push(r); }
+      }
+    }
 
-    // 3) 事实/百科类 → 维基百科干净简介
-    if (results.length < 3) {
+    // 3) 兜底：维基百科（仅当 Tavily 没给出几条结果时）
+    if (results.length < 2) {
       const wiki = await wikiSearch(query);
       for (const r of wiki) { if (results.length >= 6) break; results.push(r); }
     }
