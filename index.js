@@ -996,7 +996,7 @@ function composeSystemPrompt(session_id, music_info, stickerMeanings, petImages)
   // 引用功能（精简）
   sys += '\n\n【引用】用户引用某条消息时，你会在其消息开头看到「引用了XX：...」，那是被引用的原文，请直接据此回应（你能看到原文，不要说"看不到"）。你也可主动引用用户之前说的话：用 [quote]用户原话[/quote] 包裹，界面会在你气泡上方显示引用条（类似微信）。一次性最多引用一条；[quote] 里的原话尽量与用户消息一致即可，不必逐字照搬。';
   // 播放音乐（精简）
-  sys += '\n\n【播放音乐】想听某首歌或建议用户听歌时，用 [music]歌名 歌手[/music] 标记（如 [music]晴天 周杰伦[/music]），系统会自动搜索播放，标记不显示。一次一首。';
+  sys += '\n\n【播放音乐】想听某首歌或建议用户听歌时，用 [music]歌名 歌手[/music] 标记（如 [music]晴天 周杰伦[/music]），系统会自动搜索播放，标记不显示。一次一首。注意：标记里只写歌名和歌手，不要加“给你放”“来一首”之类的口头语。';
   // 一起读（截断阅读内容）
   if (mem.readings && mem.readings[session_id]) {
     const rd = mem.readings[session_id];
@@ -1126,23 +1126,37 @@ async function buildChatContext({ message, session_id, model, reply_to, api_url,
 // ===== 保存 AI 回复（复用逻辑）=====
 async function saveAIReplies(replies, sessionId, history, tts_config) {
   const savedReplies = [];
+
+  // 全局提取引用：AI 常把 [quote] 单独放在一段（与正文被空行隔开，因为系统提示要求“拆成几条短消息”）。
+  // 若按分段逐个解析，引用信息会落到被丢弃的空段上，导致最终可见气泡的 reply_content 为空、引用条不显示。
+  // 因此先在整个回复里提取一次，再挂到“第一条有正文的消息”上。
+  let gReplyRole = null, gReplyContent = null, gReplyQuoteMsgId = null;
+  let rawQuote = null;
+  for (const p of replies) {
+    const qm = (p || '').match(/\[quote\]([\s\S]*?)\[\/quote\]/);
+    if (qm) { rawQuote = qm[1].trim(); break; }
+  }
+  if (rawQuote) {
+    gReplyContent = rawQuote;
+    gReplyRole = 'user';
+    const norm = (s) => (s || '').replace(/\s+/g, '').replace(/[，。！？、,.!?；;：:]/g, '');
+    let qm = history.find(h => h.role === 'user' && (h.content || '').includes(gReplyContent));
+    if (!qm) qm = history.find(h => h.role === 'user' && norm(h.content).includes(norm(gReplyContent)));
+    if (!qm) qm = history.find(h => h.role === 'user' && norm(gReplyContent).includes(norm(h.content)));
+    if (!qm) { for (let i = history.length - 1; i >= 0; i--) { if (history[i].role === 'user') { qm = history[i]; break; } } }
+    gReplyQuoteMsgId = qm ? qm.id : null;
+  }
+
+  let quoteApplied = false;
   for (let i = 0; i < replies.length; i++) {
     const replyTime = new Date().toISOString();
-    let part = replies[i];
+    let part = (replies[i] || '').replace(/\[quote\][\s\S]*?\[\/quote\]/, '').trim();
 
+    // 把引用挂到第一条有实际正文的段落（其余分段不重复引用，避免每条都带引用条）
     let replyRole = null, replyContent = null, replyQuoteMsgId = null;
-    const quoteMatch = part.match(/\[quote\]([\s\S]*?)\[\/quote\]/);
-    if (quoteMatch) {
-      replyContent = quoteMatch[1].trim();
-      replyRole = 'user';
-      // 解析被引用消息：先精确匹配，再归一化（去空白/标点）匹配，最后默认引用最近一条用户消息
-      const norm = (s) => (s || '').replace(/\s+/g, '').replace(/[，。！？、,.!?；;：:]/g, '');
-      let qm = history.find(h => h.role === 'user' && (h.content || '').includes(replyContent));
-      if (!qm) qm = history.find(h => h.role === 'user' && norm(h.content).includes(norm(replyContent)));
-      if (!qm) qm = history.find(h => h.role === 'user' && norm(replyContent).includes(norm(h.content)));
-      if (!qm) { for (let i = history.length - 1; i >= 0; i--) { if (history[i].role === 'user') { qm = history[i]; break; } } }
-      replyQuoteMsgId = qm ? qm.id : null;
-      part = part.replace(/\[quote\][\s\S]*?\[\/quote\]/, '').trim();
+    if (!quoteApplied && part.length > 0 && gReplyContent) {
+      replyRole = gReplyRole; replyContent = gReplyContent; replyQuoteMsgId = gReplyQuoteMsgId;
+      quoteApplied = true;
     }
 
     const voiceMatch = part.match(/\[voice\]([\s\S]*?)\[\/voice\]/);
@@ -1895,25 +1909,29 @@ async function wikiSearch(query) {
 // 真实联网搜索：Tavily（Render 美国机房可直连，返回与查询高度相关的网页结果 + 直接答案）
 const TAVILY_API_KEY = process.env.TAVILY_API_KEY || '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';
 async function tavilySearch(query) {
+  // 识别“新闻/最近发生”类意图：这类查询要取最新资讯，走 Tavily 的 news 通道 + 近 30 天
+  const isNews = /最近|最新|新闻|今天|昨天|前天|本周|本月|这周|这月|上周|上月|发生了|报道|消息|动态|进展|刚刚|日前|据悉|热搜|爆|大事|更新|赛季|夺冠|上映|发布/.test(query);
+  const body = {
+    api_key: TAVILY_API_KEY,
+    query: cleanQuery(query) || query,
+    search_depth: 'advanced',          // 深度检索，覆盖更全、时效更好
+    max_results: isNews ? 8 : 6,
+    include_answer: true,
+    include_raw_content: false
+  };
+  if (isNews) { body.topic = 'news'; body.days = 30; }
   try {
     const resp = await fetch('https://api.tavily.com/search', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        api_key: TAVILY_API_KEY,
-        query: cleanQuery(query) || query,
-        search_depth: 'basic',
-        max_results: 6,
-        include_answer: true,
-        include_raw_content: false
-      })
+      body: JSON.stringify(body)
     });
     if (!resp.ok) { console.error('Tavily 返回', resp.status); return null; }
     const data = await resp.json();
     const results = [];
     if (data.answer) results.push({ title: '直接回答', snippet: String(data.answer), url: '' });
     for (const r of (data.results || [])) {
-      const snip = (r.content || '').replace(/\s+/g, ' ').trim().slice(0, 300);
+      const snip = (r.content || '').replace(/\s+/g, ' ').trim().slice(0, 450);
       if (snip) results.push({ title: r.title || '', snippet: snip, url: r.url || '' });
     }
     return results;
@@ -2022,7 +2040,7 @@ app.post('/music/search', async (req, res) => {
         pic: picUrl,
         cover: picUrl,
         lyric_id: s.id,
-        duration: 0
+        duration: s.duration || 0
       };
     }).filter(s => s.id && s.name);
     res.json({ success: true, songs });
