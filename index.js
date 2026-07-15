@@ -979,7 +979,7 @@ function composeSystemPrompt(session_id, music_info, stickerMeanings, petImages)
     : (Array.isArray(mem.profile.petImages) ? mem.profile.petImages : []);
   if (petList.length > 0) {
     const list = petList.map((p, i) => `${i + 1}. ${p.name || ('图片' + (i + 1))}（id=${p.id}）`).join('\n');
-    sys += `\n\n【桌宠图片库】用户上传了以下桌宠形象（已自动抠去背景，无边框），你可以随时选用：\n${list}\n想换桌宠时回 [act]pet:<对应的id>[/act]（例如 [act]pet:${petList[0].id}[/act]）。`;
+    sys += `\n\n【桌宠图片库】用户上传了以下桌宠形象（原图），你可以随时选用：\n${list}\n想换桌宠时回 [act]pet:<对应的id>[/act]（例如 [act]pet:${petList[0].id}[/act]）。选中后会自动抠去背景。`;
   }
   // 时间感知（北京时间）
   const shParts = new Intl.DateTimeFormat('zh-CN', {
@@ -1020,7 +1020,7 @@ function composeSystemPrompt(session_id, music_info, stickerMeanings, petImages)
 
   // AI 自我操作协议（直接操作界面，标记不会显示给用户）
   sys += `\n\n【你可以直接操作界面】在回复里嵌入指令标记即可操作这个网页（这些标记不会被用户看到，正常聊天文字照常显示）：\n` +
-    `[act]theme:海洋蓝|浅橙|浅灰|浅紫|深海|珊瑚|极地[/act] —— 切换主题配色（深海=深蓝暗色系，珊瑚=暖橙粉色系，极地=冰蓝白色系）\n` +
+    `[act]theme:海洋蓝|浅橙|浅灰|浅紫|深海|珊瑚[/act] —— 切换主题配色（深海=深蓝暗色系，珊瑚=暖橙粉色系）\n` +
     `[act]open:音乐|简介|记忆宫殿|工具栏|一起读|设置[/act] —— 打开对应面板（注意：「联网搜索」的开关在「设置」里，不要在聊天框下方的工具栏"+"里找联网功能）\n` +
     `[act]search:on|off[/act] —— 直接开关"联网搜索"（等效于在设置里切换）\n` +
     `[act]ambient:play:海浪|雨声|水泡|鲸鸣|海鸥[/act] —— 播放环境音效（可选：海浪、雨声、水泡、鲸鸣、海鸥）。根据聊天氛围自然选择，比如聊到下雨就放雨声，聊到深海就放鲸鸣，夜晚聊天放海浪。标记不显示给用户。\n` +
