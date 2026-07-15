@@ -124,7 +124,7 @@ const defaultSettings = {
   max_context_rounds: 250,
   compress_threshold: 4000,
   compress_keep_rounds: 15,
-  max_reply_tokens: 1024,
+  max_reply_tokens: 4096,
   auto_summarize: true,
   auto_summarize_after: 50,
   delete_after_summarize: false
@@ -887,7 +887,7 @@ async function callModel(messages, modelName, settings, customConfig) {
       model: modelId,
       messages,
       stream: false,
-      max_tokens: settings.max_reply_tokens || 1024,
+      max_tokens: settings.max_reply_tokens || 4096,
       temperature: settings.temperature ?? 0.7
     })
   });
@@ -927,7 +927,7 @@ async function callModelStream(messages, modelName, settings, customConfig) {
       messages,
       stream: true,
       stream_options: { include_usage: true },
-      max_tokens: settings.max_reply_tokens || 1024,
+      max_tokens: settings.max_reply_tokens || 4096,
       temperature: settings.temperature ?? 0.7
     })
   });
@@ -994,7 +994,7 @@ function composeSystemPrompt(session_id, music_info, stickerMeanings, petImages)
   const naturalTime = `${yy}年${mo}月${dd}日 ${weekdayCN} ${period}${hour12}点${mm}分`;
   sys += `\n\n【当前时间】${naturalTime}（北京时间）。用户问到时间时如实、简洁地回答即可。`;
   // 引用功能（精简）
-  sys += '\n\n【引用】用户引用某条消息时，你会在其消息开头看到「引用了XX：...」，那是被引用的原文，请直接据此回应（你能看到原文，不要说"看不到"）。你也可主动引用用户之前说的话：用 [quote]用户原话[/quote] 包裹，界面会在你气泡上方显示引用条（类似微信）。一次性最多引用一条；[quote] 里的原话尽量与用户消息一致即可，不必逐字照搬。';
+  sys += '\n\n【引用】用户引用某条消息时，你会在其消息开头看到「引用了XX：...」，那是被引用的原文。你必须先针对被引用的内容做出回应，再展开其余话题。你能看到原文，不要说"看不到"。你也可主动引用用户之前说的话：用 [quote]用户原话[/quote] 包裹（放在回复最前面），界面会在你气泡上方显示引用条（类似微信）。注意：[quote] 里的原话必须与用户消息中的原句高度一致（可以截取关键部分，但不要改写意思），这样系统才能正确匹配到被引用的消息。一次性最多引用一条。';
   // 播放音乐（精简）
   sys += '\n\n【播放音乐】想听某首歌或建议用户听歌时，用 [music]歌名 歌手[/music] 标记（如 [music]晴天 周杰伦[/music]），系统会自动搜索播放，标记不显示。一次一首。注意：标记里只写歌名和歌手，不要加“给你放”“来一首”之类的口头语。';
   // 一起读（截断阅读内容）
@@ -1020,7 +1020,7 @@ function composeSystemPrompt(session_id, music_info, stickerMeanings, petImages)
 
   // AI 自我操作协议（直接操作界面，标记不会显示给用户）
   sys += `\n\n【你可以直接操作界面】在回复里嵌入指令标记即可操作这个网页（这些标记不会被用户看到，正常聊天文字照常显示）：\n` +
-    `[act]theme:海洋蓝|浅橙|浅灰|浅紫[/act] —— 切换主题配色\n` +
+    `[act]theme:海洋蓝|浅橙|浅灰|浅紫|深海|珊瑚|极地[/act] —— 切换主题配色（深海=深蓝暗色系，珊瑚=暖橙粉色系，极地=冰蓝白色系）\n` +
     `[act]open:音乐|简介|记忆宫殿|工具栏|一起读|设置[/act] —— 打开对应面板（注意：「联网搜索」的开关在「设置」里，不要在聊天框下方的工具栏"+"里找联网功能）\n` +
     `[act]search:on|off[/act] —— 直接开关"联网搜索"（等效于在设置里切换）\n` +
     `[act]type:文字内容[/act] —— 把文字输入到聊天输入框（像替用户打字）\n` +
@@ -1040,7 +1040,7 @@ function composeSystemPrompt(session_id, music_info, stickerMeanings, petImages)
 }
 
 // ===== 构建对话上下文（复用逻辑）=====
-async function buildChatContext({ message, session_id, model, reply_to, api_url, api_key, api_model, images, image_count, file_content, temperature, max_context_rounds, auto_summarize_after, compress_keep_rounds, max_reply_tokens, music_info, sticker_meanings, petImages }) {
+async function buildChatContext({ message, session_id, model, reply_to, reply_content, reply_role, api_url, api_key, api_model, images, image_count, file_content, temperature, max_context_rounds, auto_summarize_after, compress_keep_rounds, max_reply_tokens, music_info, sticker_meanings, petImages }) {
   const now = new Date();
   const resolvedModel = (model === 'deepseek') ? 'deepseek-chat' : (api_model || '[特价MAX-CC]claude-sonnet-5');
   let settings = { ...defaultSettings };
@@ -1054,7 +1054,9 @@ async function buildChatContext({ message, session_id, model, reply_to, api_url,
   if (max_reply_tokens) settings.max_reply_tokens = max_reply_tokens;
 
   const quotedMsg = reply_to ? await getMessageById(reply_to) : null;
-  const quotedPreview = quotedMsg ? quotedPreviewOf(quotedMsg) : null;
+  // 如果按 ID 找不到被引用消息，用前端直传的 reply_content/reply_role 构造一个伪 quotedMsg
+  const effectiveQuoted = quotedMsg || (reply_content ? { role: reply_role || 'user', content: reply_content } : null);
+  const quotedPreview = effectiveQuoted ? quotedPreviewOf(effectiveQuoted) : null;
 
   // 加载历史
   const history = mem.messages.filter(m => m.session_id === session_id && m.visible).sort((a, b) => new Date(a.created_at) - new Date(b.created_at)).map(m => {
@@ -1100,11 +1102,11 @@ async function buildChatContext({ message, session_id, model, reply_to, api_url,
   }
 
   // 引用注入
-  if (quotedMsg) {
-    const roleName = quotedMsg.role === 'user' ? (mem.profile.userName || '用户') : (mem.profile.aiName || '裴拟');
+  if (effectiveQuoted) {
+    const roleName = effectiveQuoted.role === 'user' ? (mem.profile.userName || '用户') : (mem.profile.aiName || '裴拟');
     for (let i = contextMessages.length - 1; i >= 0; i--) {
       if (contextMessages[i].role === 'user') {
-        const quoteText = quotedPreviewOf(quotedMsg);
+        const quoteText = quotedPreviewOf(effectiveQuoted);
         const quoteLine = `(引用了「${roleName}」的消息：「${quoteText}」)`;
         const c = contextMessages[i].content;
         if (Array.isArray(c)) {
@@ -1120,7 +1122,7 @@ async function buildChatContext({ message, session_id, model, reply_to, api_url,
     }
   }
 
-  return { contextMessages, history, settings, resolvedModel, quotedMsg, quotedPreview };
+  return { contextMessages, history, settings, resolvedModel, quotedMsg: effectiveQuoted, quotedPreview };
 }
 
 // ===== 保存 AI 回复（复用逻辑）=====
@@ -1333,7 +1335,7 @@ app.post('/chat/stream', async (req, res) => {
 
 // ===== 重新生成 =====
 app.post('/chat/regenerate', async (req, res) => {
-  const { session_id, model, api_url, api_key, api_model, tts_config, temperature } = req.body;
+  const { session_id, model, api_url, api_key, api_model, tts_config, temperature, reply_to: bodyReplyTo, reply_content: bodyReplyContent, reply_role: bodyReplyRole } = req.body;
   if (!session_id) return res.status(400).json({ error: '缺少 session_id' });
 
   // SSE headers
@@ -1369,6 +1371,8 @@ app.post('/chat/regenerate', async (req, res) => {
       session_id,
       model,
       reply_to: req.body.reply_to || lastUserMsg.reply_to,
+      reply_content: bodyReplyContent || lastUserMsg.reply_content,
+      reply_role: bodyReplyRole || lastUserMsg.reply_role,
       api_url, api_key, api_model,
       images: lastUserMsg.images || [],
       file_content: null,
@@ -1474,7 +1478,7 @@ app.post('/chat/regenerate', async (req, res) => {
 
 // ===== 只保存用户消息（分段发送模式，不触发 AI 回复）=====
 app.post('/messages/send', async (req, res) => {
-  const { message, session_id, images, reply_to, file_content, file_name } = req.body;
+  const { message, session_id, images, reply_to, reply_content, reply_role, file_content, file_name } = req.body;
   if (!message && (!images || images.length === 0) && !file_content) return res.status(400).json({ error: '消息不能为空' });
   if (!session_id) return res.status(400).json({ error: '缺少 session_id' });
 
@@ -1488,10 +1492,14 @@ app.post('/messages/send', async (req, res) => {
       summarized: false
     };
 
+    // 优先按 ID 查找被引用消息；找不到则用前端直传的 reply_content/reply_role（解决前端 genId 与后端 nextId 不一致问题）
     const quotedMsg = reply_to ? mem.messages.find(m => String(m.id) === String(reply_to)) : null;
     if (quotedMsg) {
       userMsg.reply_role = quotedMsg.role;
       userMsg.reply_content = quotedPreviewOf(quotedMsg);
+    } else if (reply_content) {
+      userMsg.reply_role = reply_role || 'user';
+      userMsg.reply_content = reply_content;
     }
 
     mem.messages.push(userMsg);
@@ -1504,7 +1512,7 @@ app.post('/messages/send', async (req, res) => {
 
 // ===== 触发 AI 回复（分段发送后，用户点"让AI回复"触发）=====
 app.post('/chat/respond', async (req, res) => {
-  const { session_id, model, api_url, api_key, api_model, tts_config, temperature, max_context_rounds, auto_summarize_after, compress_keep_rounds, max_reply_tokens } = req.body;
+  const { session_id, model, api_url, api_key, api_model, tts_config, temperature, max_context_rounds, auto_summarize_after, compress_keep_rounds, max_reply_tokens, reply_to: bodyReplyTo, reply_content: bodyReplyContent, reply_role: bodyReplyRole } = req.body;
   if (!session_id) return res.status(400).json({ error: '缺少 session_id' });
 
   res.setHeader('Content-Type', 'text/event-stream');
@@ -1549,6 +1557,8 @@ app.post('/chat/respond', async (req, res) => {
       session_id,
       model,
       reply_to: req.body.reply_to || lastUserMsg.reply_to,
+      reply_content: bodyReplyContent || lastUserMsg.reply_content,
+      reply_role: bodyReplyRole || lastUserMsg.reply_role,
       api_url, api_key, api_model,
       images: imagesForCtx,
       image_count: totalImageCount,
@@ -1908,6 +1918,43 @@ async function wikiSearch(query) {
 // 因此后端联网搜索采用「实时数据用专用可直连源 + 事实类用维基百科」的组合。
 // 真实联网搜索：Tavily（Render 美国机房可直连，返回与查询高度相关的网页结果 + 直接答案）
 const TAVILY_API_KEY = process.env.TAVILY_API_KEY || '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';
+
+// DuckDuckGo HTML 搜索（免费、无需 key、从服务端请求）
+// 作为 Tavily 的兜底：Tavily dev key 有配额限制，耗尽后用 DDG 保证搜索仍可用
+async function duckDuckGoSearch(query) {
+  try {
+    const q = cleanQuery(query) || query;
+    const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(q)}`;
+    const resp = await fetch(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml',
+        'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8'
+      }
+    });
+    if (!resp.ok) { console.error('DuckDuckGo 返回', resp.status); return null; }
+    const html = await resp.text();
+    const results = [];
+    // 解析 DDG HTML 结果页：结果在 <a class="result__a" href="...">标题</a>，摘要在 <a class="result__snippet">
+    const titleRegex = /class="result__a"[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/g;
+    const snippetRegex = /class="result__snippet"[^>]*>([\s\S]*?)<\/(?:a|td)>/g;
+    const titles = [];
+    const snippets = [];
+    let m;
+    while ((m = titleRegex.exec(html)) !== null) {
+      titles.push({ url: m[1], title: decodeEntities(m[2].replace(/<[^>]+>/g, '').trim()) });
+    }
+    while ((m = snippetRegex.exec(html)) !== null) {
+      snippets.push(decodeEntities(m[1].replace(/<[^>]+>/g, '').trim()));
+    }
+    for (let i = 0; i < Math.min(titles.length, 6); i++) {
+      const title = titles[i].title;
+      const snip = snippets[i] || '';
+      if (title) results.push({ title, snippet: snip.slice(0, 300), url: titles[i].url });
+    }
+    return results.length > 0 ? results : null;
+  } catch (e) { console.error('DuckDuckGo 搜索失败:', e.message); return null; }
+}
 async function tavilySearch(query) {
   // 识别“新闻/最近发生”类意图：这类查询要取最新资讯，走 Tavily 的 news 通道 + 近 30 天
   const isNews = /最近|最新|新闻|今天|昨天|前天|本周|本月|这周|这月|上周|上月|发生了|报道|消息|动态|进展|刚刚|日前|据悉|热搜|爆|大事|更新|赛季|夺冠|上映|发布/.test(query);
@@ -1952,10 +1999,20 @@ async function webSearch(query, city) {
       const tav = await tavilySearch(query);
       if (tav && tav.length) {
         for (const r of tav) { if (results.length >= 6) break; results.push(r); }
+      } else {
+        console.log('[搜索] Tavily 无结果或失败，尝试 DuckDuckGo 兜底');
       }
     }
 
-    // 3) 兜底：维基百科（仅当 Tavily 没给出几条结果时）
+    // 2b) DuckDuckGo HTML 搜索（Tavily 配额耗尽时的兜底，免费无需 key）
+    if (results.length < 2) {
+      const ddg = await duckDuckGoSearch(query);
+      if (ddg && ddg.length) {
+        for (const r of ddg) { if (results.length >= 6) break; results.push(r); }
+      }
+    }
+
+    // 3) 兜底：维基百科（仅当以上搜索都没给出几条结果时）
     if (results.length < 2) {
       const wiki = await wikiSearch(query);
       for (const r of wiki) { if (results.length >= 6) break; results.push(r); }
@@ -1973,6 +2030,53 @@ app.post('/search', async (req, res) => {
   if (!query) return res.status(400).json({ error: '缺少搜索关键词' });
   const results = await webSearch(query, req.body.search_city);
   res.json({ success: true, results });
+});
+
+// ===== 天气联动背景 =====
+// 返回简化天气条件供前端切换背景氛围
+app.get('/weather/current', async (req, res) => {
+  try {
+    const city = req.query.city || '';
+    const beijingHour = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Shanghai' })).getHours();
+    const isNight = beijingHour < 6 || beijingHour >= 19;
+
+    // 尝试用 wttr.in 获取天气
+    let condition = isNight ? 'night' : 'sunny';
+    let temp = null, desc = '';
+
+    if (city) {
+      try {
+        const url = `https://wttr.in/${encodeURIComponent(city)}?format=j1&lang=zh`;
+        const wresp = await fetch(url, { headers: { 'User-Agent': 'curl/8.0', 'Accept-Language': 'zh-CN' } });
+        if (wresp.ok) {
+          const data = await wresp.json();
+          const cur = data.current_condition && data.current_condition[0];
+          if (cur) {
+            temp = parseInt(cur.temp_C);
+            const code = cur.weatherCode;
+            desc = WWO_CODE_ZH[code] || '';
+            if (isNight) {
+              condition = 'night';
+            } else if (['113'].includes(code)) {
+              condition = 'sunny';
+            } else if (['116', '119', '122', '143', '248', '260'].includes(code)) {
+              condition = 'cloudy';
+            } else if (['176', '263', '266', '281', '284', '293', '296', '299', '302', '305', '308', '311', '314', '317', '320', '350', '353', '356', '359', '362', '365', '386', '389', '392', '395'].includes(code)) {
+              condition = 'rainy';
+            } else if (['179', '182', '185', '227', '230', '323', '326', '329', '332', '335', '338', '368', '371', '374', '377', '392', '395'].includes(code)) {
+              condition = 'snow';
+            } else {
+              condition = 'cloudy';
+            }
+          }
+        }
+      } catch (e) { console.error('天气查询失败:', e.message); }
+    }
+
+    res.json({ success: true, condition, temp, desc, isNight, city });
+  } catch (err) {
+    res.json({ success: true, condition: 'sunny', temp: null, desc: '', isNight: false, city: '' });
+  }
 });
 
 // ===== 一起读功能 =====
