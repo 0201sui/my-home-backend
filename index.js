@@ -84,6 +84,18 @@ function quotedPreviewOf(m) {
   return (m.content || '').trim();
 }
 
+// 统一按 id 查找消息（兼容 Supabase / 内存两种存储）
+async function getMessageById(id) {
+  if (!id) return null;
+  if (useSupabase && supabase) {
+    try {
+      const { data, error } = await supabase.from('messages').select('*').eq('id', String(id)).maybeSingle();
+      if (!error && data) return data;
+    } catch (e) { console.error('supabase 查询引用消息失败:', e); }
+  }
+  return mem.messages.find(m => String(m.id) === String(id)) || null;
+}
+
 // 智能分条：优先按空行分；长文无空行时按单换行分（合并过短续行）；超长无换行时按标点切成多段
 function splitReplies(text) {
   const t = (text || '').trim();
@@ -665,7 +677,7 @@ app.post('/chat', async (req, res) => {
     if (mem.settings) settings = mem.settings;
 
     // 引用消息查找（让 AI 真正"看到"被引用的内容）
-    const quotedMsg = reply_to ? mem.messages.find(m => String(m.id) === String(reply_to)) : null;
+    const quotedMsg = reply_to ? await getMessageById(reply_to) : null;
     const quotedPreview = quotedMsg ? quotedPreviewOf(quotedMsg) : null;
 
     // 保存用户消息（含图片 + 引用信息）
@@ -1039,7 +1051,7 @@ function composeSystemPrompt(session_id, music_info, stickerMeanings, petImages)
 }
 
 // ===== 构建对话上下文（复用逻辑）=====
-function buildChatContext({ message, session_id, model, reply_to, api_url, api_key, api_model, images, image_count, file_content, temperature, max_context_rounds, auto_summarize_after, compress_keep_rounds, max_reply_tokens, music_info, sticker_meanings, petImages }) {
+async function buildChatContext({ message, session_id, model, reply_to, api_url, api_key, api_model, images, image_count, file_content, temperature, max_context_rounds, auto_summarize_after, compress_keep_rounds, max_reply_tokens, music_info, sticker_meanings, petImages }) {
   const now = new Date();
   const resolvedModel = (model === 'deepseek') ? 'deepseek-chat' : (api_model || '[特价MAX-CC]claude-sonnet-5');
   let settings = { ...defaultSettings };
@@ -1052,7 +1064,7 @@ function buildChatContext({ message, session_id, model, reply_to, api_url, api_k
   if (compress_keep_rounds) settings.compress_keep_rounds = compress_keep_rounds;
   if (max_reply_tokens) settings.max_reply_tokens = max_reply_tokens;
 
-  const quotedMsg = reply_to ? mem.messages.find(m => String(m.id) === String(reply_to)) : null;
+  const quotedMsg = reply_to ? await getMessageById(reply_to) : null;
   const quotedPreview = quotedMsg ? quotedPreviewOf(quotedMsg) : null;
 
   // 加载历史
@@ -1192,7 +1204,7 @@ app.post('/chat/stream', async (req, res) => {
     };
 
     // 引用消息
-    const quotedMsg = reply_to ? mem.messages.find(m => String(m.id) === String(reply_to)) : null;
+    const quotedMsg = reply_to ? await getMessageById(reply_to) : null;
     if (quotedMsg) {
       userMsg.reply_role = quotedMsg.role;
       userMsg.reply_content = quotedPreviewOf(quotedMsg);
@@ -1224,7 +1236,7 @@ app.post('/chat/stream', async (req, res) => {
     if (searchContext) {
       contextBody.file_content = (req.body.file_content || '') + searchContext;
     }
-    const { contextMessages, history, settings } = buildChatContext(contextBody);
+    const { contextMessages, history, settings } = await buildChatContext(contextBody);
 
     // 调用模型（流式）
     const apiResp = await callModelStream(contextMessages, model, settings, customConfig);
@@ -1332,7 +1344,7 @@ app.post('/chat/regenerate', async (req, res) => {
     mem.messages = mem.messages.filter(m => !deleteIds.has(m.id));
 
     // 用最后一条用户消息重建上下文（但不重新保存用户消息）
-    const { contextMessages, history, settings } = buildChatContext({
+    const { contextMessages, history, settings } = await buildChatContext({
       message: lastUserMsg.content,
       session_id,
       model,
@@ -1496,7 +1508,7 @@ app.post('/chat/respond', async (req, res) => {
     const imagesForCtx = pendingImages.slice(-MAX_PENDING_IMAGES);
 
     // 用最后一条用户消息重建上下文（不重新保存用户消息）
-    const { contextMessages, history, settings } = buildChatContext({
+    const { contextMessages, history, settings } = await buildChatContext({
       message: lastUserMsg.content,
       session_id,
       model,
