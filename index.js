@@ -1949,35 +1949,31 @@ app.delete('/read/:sessionId', async (req, res) => {
   res.json({ success: true });
 });
 
-// ===== 音乐搜索与播放（GD Studio API，海外托管，Render 可直连；网易官方接口封 Render 的美国 IP）=====
-const GD_API = 'https://music-api.gdstudio.xyz/api.php';
-const GD_HEADERS = {
-  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-  'Referer': 'https://music.gdstudio.xyz/'
-};
-// 缓存 歌曲id -> pic_id（GD Studio 取封面需要 pic_id，而前端 detail 接口只带 song id）
+// ===== 音乐搜索与播放（飞飞点歌台 API，HTTPS，国内可直连）=====
+const FF_API = 'https://ffapi.cn/int/v1/dg_netease';
+// 缓存 歌曲id -> pic_url（飞飞搜索已直接返回 pic URL）
 const musicPicCache = {};
 
 app.post('/music/search', async (req, res) => {
   const { keyword } = req.body;
   if (!keyword) return res.status(400).json({ error: '缺少搜索关键词' });
   try {
-    const url = `${GD_API}?types=search&source=netease&name=${encodeURIComponent(keyword)}&count=15&pages=1`;
-    const resp = await fetch(url, { headers: GD_HEADERS });
-    const text = await resp.text();
-    let data;
-    try { data = JSON.parse(text); } catch { data = []; }
-    const arr = Array.isArray(data) ? data : (data.songs || data.result?.songs || []);
+    const url = `${FF_API}?msg=${encodeURIComponent(keyword)}&limit=15&format=json&act=search`;
+    const resp = await fetch(url);
+    const data = await resp.json();
+    const arr = (data && Array.isArray(data.list)) ? data.list : (Array.isArray(data) ? data : []);
     const songs = arr.map(s => {
-      const artist = Array.isArray(s.artist) ? s.artist.join(' / ') : (s.artist || s.author || '');
-      if (s.id && s.pic_id) musicPicCache[String(s.id)] = s.pic_id;
+      const artist = Array.isArray(s.singer) ? s.singer.join(' / ') : (s.singer || s.artist || s.author || '');
+      const picUrl = s.pic || s.cover || '';
+      if (s.id && picUrl) musicPicCache[String(s.id)] = picUrl;
       return {
         id: s.id,
         name: s.name || s.title || '',
         artist,
         album: s.album || '',
-        pic_id: s.pic_id || '',
-        lyric_id: s.lyric_id || s.id,
+        pic: picUrl,
+        cover: picUrl,
+        lyric_id: s.id,
         duration: 0
       };
     }).filter(s => s.id && s.name);
@@ -1990,18 +1986,8 @@ app.post('/music/search', async (req, res) => {
 
 app.get('/music/detail/:id', async (req, res) => {
   const { id } = req.params;
-  const picId = req.query.pic_id || musicPicCache[String(id)] || '';
   try {
-    let cover = '';
-    if (picId) {
-      try {
-        const picUrl = `${GD_API}?types=pic&source=netease&id=${encodeURIComponent(picId)}&size=300`;
-        const pr = await fetch(picUrl, { headers: GD_HEADERS });
-        const pt = await pr.text();
-        let pd; try { pd = JSON.parse(pt); } catch { pd = {}; }
-        cover = pd.url || pd.pic || '';
-      } catch (e) { cover = ''; }
-    }
+    const cover = musicPicCache[String(id)] || '';
     res.json({ success: true, data: { id, cover, duration: 0 } });
   } catch (err) {
     res.json({ success: true, data: { id, cover: '', duration: 0 } });
@@ -2011,15 +1997,16 @@ app.get('/music/detail/:id', async (req, res) => {
 app.get('/music/lyric/:id', async (req, res) => {
   const { id } = req.params;
   try {
-    const lyricUrl = `${GD_API}?types=lyric&source=netease&id=${encodeURIComponent(id)}`;
-    const resp = await fetch(lyricUrl, { headers: GD_HEADERS });
-    const text = await resp.text();
-    let data; try { data = JSON.parse(text); } catch { data = {}; }
-    // GD Studio 返回 { lyric: "...", tlyric: "..." }；也兼容纯文本 LRC
-    let lyric = data.lyric || '';
-    let tlyric = data.tlyric || '';
-    if (!lyric && text && text.trim().startsWith('[')) lyric = text;
-    res.json({ success: true, lyric, tlyric });
+    const lyricUrl = `${FF_API}?act=lrcgc&id=${encodeURIComponent(id)}&format=json`;
+    const resp = await fetch(lyricUrl);
+    const data = await resp.json();
+    let lyric = '';
+    if (data && data.code === 200 && data.data) {
+      lyric = data.data.lyric || data.data.lrc || (typeof data.data === 'string' ? data.data : '');
+    } else if (data && data.lyric) {
+      lyric = data.lyric;
+    }
+    res.json({ success: true, lyric, tlyric: '' });
   } catch (err) {
     res.json({ success: true, lyric: '' });
   }
@@ -2028,19 +2015,12 @@ app.get('/music/lyric/:id', async (req, res) => {
 app.get('/music/url/:id', async (req, res) => {
   const { id } = req.params;
   try {
-    // GD Studio 直返可直接播放的网易云 CDN 地址（music.126.net），br=320 为 mp3
-    const urlApi = `${GD_API}?types=url&source=netease&id=${encodeURIComponent(id)}&br=320`;
-    const resp = await fetch(urlApi, { headers: GD_HEADERS });
-    const text = await resp.text();
-    let data; try { data = JSON.parse(text); } catch { data = {}; }
-    if (data && data.url) {
-      return res.json({ success: true, url: data.url, br: data.br || 320 });
+    const urlApi = `${FF_API}?act=musicurl&id=${encodeURIComponent(id)}&format=json`;
+    const resp = await fetch(urlApi);
+    const data = await resp.json();
+    if (data && data.code === 200 && data.url) {
+      return res.json({ success: true, url: data.url, br: data.quality ? parseInt(data.quality) : 128 });
     }
-    // 兜底：降到 128
-    const alt = await fetch(`${GD_API}?types=url&source=netease&id=${encodeURIComponent(id)}&br=128`, { headers: GD_HEADERS });
-    const altText = await alt.text();
-    let altData; try { altData = JSON.parse(altText); } catch { altData = {}; }
-    if (altData && altData.url) return res.json({ success: true, url: altData.url, br: altData.br || 128 });
     return res.json({ success: false, error: '无法获取播放地址' });
   } catch (err) {
     res.json({ success: false, error: '获取播放地址失败: ' + err.message });
