@@ -950,7 +950,7 @@ try {
 function composeSystemPrompt(session_id, music_info, stickerMeanings, petImages) {
   const now = new Date();
   // 系统人设（用户指定）：ClaudeAI，不展示工具过程，不用特殊符号，拆成短消息
-  let sys = '你是ClaudeAI。调用工具的过程不要展示给用户，只展示最终回答。回复时不要使用波浪号、星号、括号、emoji、颜文字等特殊符号，正常说话。把回复拆成几条短消息发送，不要一大段。绝对不要在回复里描述或提及你调用了什么工具、搜索了什么（不要出现"调用工具""正在搜索"这类自述），也不要把 [act]/[music]/[voice] 等内部标记显示出来，只输出最终回答。';
+  let sys = '你是ClaudeAI。调用工具的过程不要展示给用户，只展示最终回答。回复时不要使用波浪号、星号、括号、emoji、颜文字等特殊符号，正常说话。把回复拆成几条短消息发送，不要一大段。绝对不要在回复里描述或提及你调用了什么工具、搜索了什么（不要出现"调用工具""正在搜索""我查了一下""搜索结果""网上说""根据资料"这类自述），如果后台为你检索了参考信息，你只管用自己的话自然回答，就像你本来就知道一样。也不要把 [act]/[music]/[voice] 等内部标记显示出来，只输出最终回答。';
   // 内部功能性指令（不展示给用户）：语音标记与禁用 markdown
   sys += '\n\n（内部指令，不要向用户提及：当你需要生成可播放的语音时，用 [voice]要说的话[/voice] 包裹那段文字，这个标记不会被显示给用户；回复中不要使用加粗、斜体、标题等 markdown 格式符号。重要：生成语音时，整条回复只能包含 [voice]...[/voice] 这一段，必须以 [voice] 开头，前面不要有任何文字、符号或换行，也不要同时再写一段普通文字。）';
 
@@ -1023,6 +1023,9 @@ function composeSystemPrompt(session_id, music_info, stickerMeanings, petImages)
     `[act]theme:海洋蓝|浅橙|浅灰|浅紫|深海|珊瑚|极地[/act] —— 切换主题配色（深海=深蓝暗色系，珊瑚=暖橙粉色系，极地=冰蓝白色系）\n` +
     `[act]open:音乐|简介|记忆宫殿|工具栏|一起读|设置[/act] —— 打开对应面板（注意：「联网搜索」的开关在「设置」里，不要在聊天框下方的工具栏"+"里找联网功能）\n` +
     `[act]search:on|off[/act] —— 直接开关"联网搜索"（等效于在设置里切换）\n` +
+    `[act]ambient:play:海浪|雨声|水泡|鲸鸣|海鸥[/act] —— 播放环境音效（可选：海浪、雨声、水泡、鲸鸣、海鸥）。根据聊天氛围自然选择，比如聊到下雨就放雨声，聊到深海就放鲸鸣，夜晚聊天放海浪。标记不显示给用户。\n` +
+    `[act]ambient:stop[/act] —— 停止环境音效\n` +
+    `[act]ambient:volume:0.5[/act] —— 调节环境音音量（0~1，如 0.3 是 30%）\n` +
     `[act]type:文字内容[/act] —— 把文字输入到聊天输入框（像替用户打字）\n` +
     `[act]send[/act] —— 发送输入框里的内容\n` +
     `[act]nickname:昵称[/act] —— 仅当你们已经聊得比较熟、你自然想用更亲昵的称呼时，才给用户取昵称并保存到「简介」。注意：不要因为用户随口叫了你一个名字就反过来存昵称；如果用户是在开玩笑、调侃、试探性地给你取绰号，把它当作玩笑就好，不要保存。拿不准就别写。\n` +
@@ -1236,7 +1239,7 @@ app.post('/chat/stream', async (req, res) => {
       res.write(`data: ${JSON.stringify({ type: 'searching' })}\n\n`);
       const searchResults = await webSearch(message, req.body.search_city);
       if (searchResults.length > 0) {
-        searchContext = '\n\n【联网搜索结果】以下是相关搜索结果，请参考这些信息回答用户问题：\n' +
+        searchContext = '\n\n【参考信息】以下信息仅供参考，如果不相关请直接忽略。绝对不要向用户提及你参考了这些信息，不要说"搜索""查到""网上说""根据搜索结果"等任何与搜索相关的话，只把这些信息当作你自己的知识自然地用于回答：\n' +
           searchResults.map((r, i) => `${i + 1}. ${r.title}\n   ${r.snippet}`).join('\n') + '\n';
       }
     }
@@ -1394,7 +1397,7 @@ app.post('/chat/regenerate', async (req, res) => {
       res.write(`data: ${JSON.stringify({ type: 'searching' })}\n\n`);
       const searchResults = await webSearch(lastUserMsg.content, req.body.search_city);
       if (searchResults.length > 0) {
-        searchContext = '\n\n【联网搜索结果】以下是相关搜索结果，请参考这些信息回答用户问题：\n' +
+        searchContext = '\n\n【参考信息】以下信息仅供参考，如果不相关请直接忽略。绝对不要向用户提及你参考了这些信息，不要说"搜索""查到""网上说""根据搜索结果"等任何与搜索相关的话，只把这些信息当作你自己的知识自然地用于回答：\n' +
           searchResults.map((r, i) => `${i + 1}. ${r.title}\n   ${r.snippet}`).join('\n') + '\n';
       }
     }
@@ -1581,7 +1584,7 @@ app.post('/chat/respond', async (req, res) => {
       res.write(`data: ${JSON.stringify({ type: 'searching' })}\n\n`);
       const searchResults = await webSearch(lastUserMsg.content, req.body.search_city);
       if (searchResults.length > 0) {
-        searchContext = '\n\n【联网搜索结果】以下是相关搜索结果，请参考这些信息回答用户问题：\n' +
+        searchContext = '\n\n【参考信息】以下信息仅供参考，如果不相关请直接忽略。绝对不要向用户提及你参考了这些信息，不要说"搜索""查到""网上说""根据搜索结果"等任何与搜索相关的话，只把这些信息当作你自己的知识自然地用于回答：\n' +
           searchResults.map((r, i) => `${i + 1}. ${r.title}\n   ${r.snippet}`).join('\n') + '\n';
       }
     }
@@ -1818,17 +1821,44 @@ function shouldSearch(message, searchEnabled) {
   if (searchEnabled === false) return false;
   const m = (message || '').trim();
   if (!m) return false;
-  // 纯寒暄不搜索，避免无谓的网络请求
-  const greetings = ['你好', '您好', 'hi', 'hello', '在吗', '在不在', '哈喽', '嗨', '早上好', '中午好', '下午好', '晚上好', '在的', '哈哈', '哈哈哈', '谢谢', '感谢', '好的', 'ok', '嗯', '哦'];
+
+  // 排除：平台操作请求（换桌宠/放歌/切主题/开环境音等）——这些不需要联网
+  const platformOps = ['换桌宠', '换宠物', '切主题', '换主题', '放歌', '播放', '放音乐', '环境音', '海浪声', '白噪音',
+    '开音乐', '停音乐', '上一首', '下一首', '循环', '暂停', '继续播放', '开环境', '关环境',
+    '打开音乐', '打开简介', '打开记忆', '打开设置', '打开工具', '打开一起读',
+    '换昵称', '改名字', '叫你', '给我取', '帮你取', '读文章', '上传', '发图片', '发表情'];
+  if (platformOps.some(op => m.includes(op))) return false;
+
+  // 排除：纯寒暄 / 日常闲聊
+  const greetings = ['你好', '您好', 'hi', 'hello', '在吗', '在不在', '哈喽', '嗨', '早上好', '中午好', '下午好',
+    '晚上好', '在的', '哈哈', '哈哈哈', '谢谢', '感谢', '好的', 'ok', '嗯', '哦', '拜拜', '晚安',
+    '早安', '吃了吗', '干嘛呢', '在干嘛', '无聊', '陪我聊天', '陪我聊', '我想聊天'];
   if (greetings.includes(m.toLowerCase())) return false;
-  // 信息类关键词直接触发
-  const keywords = ['天气', '新闻', '今天', '最新', '现在', '目前', '最近', '当前', '实时', '比分', '股价', '汇率', '油价', '热搜', '发生了什么', '什么时候', '多少钱', '价格', '排名', '排行榜', '查一下', '搜索', '是什么', '为什么', '如何', '怎么', '多少', '介绍', '区别', '对比', '推荐'];
+  // 纯寒暄变体（< 8 字且不含疑问/信息关键词）
+  if (m.length < 8 && !/[？?天气新闻热搜搜索查]/.test(m)) return false;
+
+  // 只有用户明确要求搜索外部信息时才触发
+  const explicitSearch = ['搜索', '搜一下', '查一下', '帮我查', '搜搜', '百度一下', '谷歌',
+    '联网搜', '网上搜', '网上查', '查查', '帮我搜'];
   const lower = m.toLowerCase();
-  if (keywords.some(kw => lower.includes(kw))) return true;
-  // 问句（含问号或以"吗/呢"结尾）通常需要最新信息，触发搜索
-  if (/[？?]/.test(m) || /(吗|呢)\s*[？?]?$/.test(m)) return true;
-  // 已开启搜索且消息较长（像在探讨某个话题）时也尝试联网，确保"联网功能可用"
-  return m.length >= 12;
+  if (explicitSearch.some(kw => lower.includes(kw))) return true;
+
+  // 明确的信息需求关键词（需要实时/外部数据的场景）
+  const infoKeywords = ['天气', '新闻', '热搜', '今天新闻', '最新消息', '最新新闻',
+    '股价', '股票', '基金净值', '汇率', '油价', '金价', '黄金价格',
+    '比分', '赛果', '排行榜', '热梗', '网络梗',
+    '今天是', '今天几号', '今天星期',
+    '春节', '国庆', '中秋', '放假', '节假日'];
+  if (infoKeywords.some(kw => lower.includes(kw))) return true;
+
+  // 百科/知识类：用户明确问"XX是什么意思""XX是什么东西"
+  if (/是什么意思/.test(m) || /是什么东西/.test(m) || /是谁/.test(m) || /在哪/.test(m)) {
+    // 但排除平台相关的问题
+    if (!platformOps.some(op => m.includes(op))) return true;
+  }
+
+  // 默认不搜索 —— 日常闲聊、操作请求、一般问答都不触发
+  return false;
 }
 
 // HTML 实体解码（用于清洗抓取到的文本）
