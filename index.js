@@ -113,20 +113,8 @@ function splitReplies(text) {
     }
     if (parts.length > 1) return parts;
   }
-  // 3) 没有换行但较长：按句号/问号/感叹号切成多段短消息（避免一整坨；含语音/引用标记则不切，防止打断标记）
-  if (!t.includes('\n') && t.length >= 80 && !t.includes('[voice]') && !t.includes('[quote]')) {
-    const sentences = t.split(/(?<=[。！？!?])/).map(p => p.trim()).filter(Boolean);
-    if (sentences.length > 1) {
-      parts = [];
-      let buf = '';
-      for (const s of sentences) {
-        if (buf && (buf.length + s.length) > 55) { parts.push(buf); buf = ''; }
-        buf += s;
-      }
-      if (buf) parts.push(buf);
-      if (parts.length > 1) return parts;
-    }
-  }
+  // 3) 不再强制按标点切碎：单段长文保持为一条气泡（AI 已被告知用空行/换行来表达"多条短消息"），
+  //    避免"先全部生成再被自动拆成好几段"的割裂感。
   return [t];
 }
 
@@ -1006,7 +994,7 @@ function composeSystemPrompt(session_id, music_info, stickerMeanings, petImages)
   const naturalTime = `${yy}年${mo}月${dd}日 ${weekdayCN} ${period}${hour12}点${mm}分`;
   sys += `\n\n【当前时间】${naturalTime}（北京时间）。用户问到时间时如实、简洁地回答即可。`;
   // 引用功能（精简）
-  sys += '\n\n【引用】用户引用某条消息时，你会在其消息开头看到「引用了XX：...」，请据此回应（你能看到被引用的原文，所以请直接回答，不要说"看不到"）。你也可主动引用用户之前的话：用 [quote]原话[/quote] 包裹，会显示在你气泡上方（像微信）。注意：一次回复最多引用一条消息，不要连续引用多条；[quote] 里的原话要和被引用消息的原文尽量一致。';
+  sys += '\n\n【引用】用户引用某条消息时，你会在其消息开头看到「引用了XX：...」，那是被引用的原文，请直接据此回应（你能看到原文，不要说"看不到"）。你也可主动引用用户之前说的话：用 [quote]用户原话[/quote] 包裹，界面会在你气泡上方显示引用条（类似微信）。一次性最多引用一条；[quote] 里的原话尽量与用户消息一致即可，不必逐字照搬。';
   // 播放音乐（精简）
   sys += '\n\n【播放音乐】想听某首歌或建议用户听歌时，用 [music]歌名 歌手[/music] 标记（如 [music]晴天 周杰伦[/music]），系统会自动搜索播放，标记不显示。一次一首。';
   // 一起读（截断阅读内容）
@@ -1033,7 +1021,8 @@ function composeSystemPrompt(session_id, music_info, stickerMeanings, petImages)
   // AI 自我操作协议（直接操作界面，标记不会显示给用户）
   sys += `\n\n【你可以直接操作界面】在回复里嵌入指令标记即可操作这个网页（这些标记不会被用户看到，正常聊天文字照常显示）：\n` +
     `[act]theme:海洋蓝|浅橙|浅灰|浅紫[/act] —— 切换主题配色\n` +
-    `[act]open:音乐|简介|记忆宫殿|工具栏|一起读[/act] —— 打开对应面板\n` +
+    `[act]open:音乐|简介|记忆宫殿|工具栏|一起读|设置[/act] —— 打开对应面板（注意：「联网搜索」的开关在「设置」里，不要在聊天框下方的工具栏"+"里找联网功能）\n` +
+    `[act]search:on|off[/act] —— 直接开关"联网搜索"（等效于在设置里切换）\n` +
     `[act]type:文字内容[/act] —— 把文字输入到聊天输入框（像替用户打字）\n` +
     `[act]send[/act] —— 发送输入框里的内容\n` +
     `[act]nickname:昵称[/act] —— 仅当你们已经聊得比较熟、你自然想用更亲昵的称呼时，才给用户取昵称并保存到「简介」。注意：不要因为用户随口叫了你一个名字就反过来存昵称；如果用户是在开玩笑、调侃、试探性地给你取绰号，把它当作玩笑就好，不要保存。拿不准就别写。\n` +
@@ -1146,7 +1135,12 @@ async function saveAIReplies(replies, sessionId, history, tts_config) {
     if (quoteMatch) {
       replyContent = quoteMatch[1].trim();
       replyRole = 'user';
-      const qm = history.find(h => h.role === 'user' && (h.content || '').includes(replyContent));
+      // 解析被引用消息：先精确匹配，再归一化（去空白/标点）匹配，最后默认引用最近一条用户消息
+      const norm = (s) => (s || '').replace(/\s+/g, '').replace(/[，。！？、,.!?；;：:]/g, '');
+      let qm = history.find(h => h.role === 'user' && (h.content || '').includes(replyContent));
+      if (!qm) qm = history.find(h => h.role === 'user' && norm(h.content).includes(norm(replyContent)));
+      if (!qm) qm = history.find(h => h.role === 'user' && norm(replyContent).includes(norm(h.content)));
+      if (!qm) { for (let i = history.length - 1; i >= 0; i--) { if (history[i].role === 'user') { qm = history[i]; break; } } }
       replyQuoteMsgId = qm ? qm.id : null;
       part = part.replace(/\[quote\][\s\S]*?\[\/quote\]/, '').trim();
     }
@@ -1245,6 +1239,7 @@ app.post('/chat/stream', async (req, res) => {
     const decoder = new TextDecoder();
     let buffer = '';
     let fullText = '';
+    let forwardedLen = 0;
     let usage = null;
 
     while (true) {
@@ -1288,6 +1283,17 @@ app.post('/chat/stream', async (req, res) => {
     }
 
     // 智能分条并保存
+    // 上游若一次性吐出大段内容（未实时转发），把剩余部分按小字符块渐进吐出，强化流式效果
+    if (!aborted && forwardedLen < fullText.length) {
+      const _remaining = fullText.slice(forwardedLen);
+      const CHUNK = 3;
+      for (let i = 0; i < _remaining.length; i += CHUNK) {
+        if (aborted) break;
+        const piece = _remaining.slice(i, i + CHUNK);
+        res.write(`data: ${JSON.stringify({ type: 'delta', content: piece })}\n\n`);
+        await new Promise(r => setTimeout(r, 12));
+      }
+    }
     const replies = splitReplies(fullText);
     const savedReplies = await saveAIReplies(replies, session_id, history, tts_config);
 
@@ -1348,7 +1354,7 @@ app.post('/chat/regenerate', async (req, res) => {
       message: lastUserMsg.content,
       session_id,
       model,
-      reply_to: lastUserMsg.reply_to,
+      reply_to: req.body.reply_to || lastUserMsg.reply_to,
       api_url, api_key, api_model,
       images: lastUserMsg.images || [],
       file_content: null,
@@ -1391,6 +1397,7 @@ app.post('/chat/regenerate', async (req, res) => {
     const decoder = new TextDecoder();
     let buffer = '';
     let fullText = '';
+    let forwardedLen = 0;
     let usage = null;
 
     while (true) {
@@ -1412,7 +1419,11 @@ app.post('/chat/regenerate', async (req, res) => {
           const delta = parsed.choices?.[0]?.delta?.content;
           if (delta) {
             fullText += delta;
-            if (!aborted) res.write(`data: ${JSON.stringify({ type: 'delta', content: delta })}\n\n`);
+            // 只实时转发"像 token 一样小"的分片，保证流式观感；过大分片先攒着，最后再渐进吐出
+            if (!aborted && delta.length <= 12) {
+              res.write(`data: ${JSON.stringify({ type: 'delta', content: delta })}\n\n`);
+              forwardedLen += delta.length;
+            }
           }
           if (parsed.usage) usage = parsed.usage;
         } catch (e) { /* skip */ }
@@ -1422,6 +1433,17 @@ app.post('/chat/regenerate', async (req, res) => {
     if (aborted && fullText) fullText += '\n\n[生成已被用户停止]';
     if (!fullText.trim()) fullText = '抱歉，未能生成回复。';
 
+    // 上游若一次性吐出大段内容（未实时转发），把剩余部分按小字符块渐进吐出，强化流式效果
+    if (!aborted && forwardedLen < fullText.length) {
+      const _remaining = fullText.slice(forwardedLen);
+      const CHUNK = 3;
+      for (let i = 0; i < _remaining.length; i += CHUNK) {
+        if (aborted) break;
+        const piece = _remaining.slice(i, i + CHUNK);
+        res.write(`data: ${JSON.stringify({ type: 'delta', content: piece })}\n\n`);
+        await new Promise(r => setTimeout(r, 12));
+      }
+    }
     const replies = splitReplies(fullText);
     const savedReplies = await saveAIReplies(replies, session_id, history, tts_config);
 
@@ -1512,7 +1534,7 @@ app.post('/chat/respond', async (req, res) => {
       message: lastUserMsg.content,
       session_id,
       model,
-      reply_to: lastUserMsg.reply_to,
+      reply_to: req.body.reply_to || lastUserMsg.reply_to,
       api_url, api_key, api_model,
       images: imagesForCtx,
       image_count: totalImageCount,
@@ -1556,6 +1578,7 @@ app.post('/chat/respond', async (req, res) => {
     const decoder = new TextDecoder();
     let buffer = '';
     let fullText = '';
+    let forwardedLen = 0;
     let usage = null;
 
     while (true) {
@@ -1575,7 +1598,11 @@ app.post('/chat/respond', async (req, res) => {
           const delta = parsed.choices?.[0]?.delta?.content;
           if (delta) {
             fullText += delta;
-            if (!aborted) res.write(`data: ${JSON.stringify({ type: 'delta', content: delta })}\n\n`);
+            // 只实时转发"像 token 一样小"的分片，保证流式观感；过大分片先攒着，最后再渐进吐出
+            if (!aborted && delta.length <= 12) {
+              res.write(`data: ${JSON.stringify({ type: 'delta', content: delta })}\n\n`);
+              forwardedLen += delta.length;
+            }
           }
           if (parsed.usage) usage = parsed.usage;
         } catch (e) { /* skip */ }
@@ -1585,6 +1612,17 @@ app.post('/chat/respond', async (req, res) => {
     if (aborted && fullText) fullText += '\n\n[生成已被用户停止]';
     if (!fullText.trim()) fullText = '抱歉，未能生成回复。';
 
+    // 上游若一次性吐出大段内容（未实时转发），把剩余部分按小字符块渐进吐出，强化流式效果
+    if (!aborted && forwardedLen < fullText.length) {
+      const _remaining = fullText.slice(forwardedLen);
+      const CHUNK = 3;
+      for (let i = 0; i < _remaining.length; i += CHUNK) {
+        if (aborted) break;
+        const piece = _remaining.slice(i, i + CHUNK);
+        res.write(`data: ${JSON.stringify({ type: 'delta', content: piece })}\n\n`);
+        await new Promise(r => setTimeout(r, 12));
+      }
+    }
     const replies = splitReplies(fullText);
     const savedReplies = await saveAIReplies(replies, session_id, history, tts_config);
 
@@ -1752,11 +1790,21 @@ async function updateProfileSummary(sessionId, recentContent) {
 
 // ===== 联网搜索 =====
 function shouldSearch(message, searchEnabled) {
-  // 如果前端明确关闭了搜索，则不搜索
+  // 前端明确关闭则不搜索
   if (searchEnabled === false) return false;
-  const keywords = ['天气', '新闻', '今天', '最新', '现在', '目前', '最近', '当前', '实时', '比分', '股价', '汇率', '油价', '热搜', '发生了什么', '什么时候', '多少钱', '价格', '排名', '排行榜'];
-  const lower = message.toLowerCase();
-  return keywords.some(kw => lower.includes(kw));
+  const m = (message || '').trim();
+  if (!m) return false;
+  // 纯寒暄不搜索，避免无谓的网络请求
+  const greetings = ['你好', '您好', 'hi', 'hello', '在吗', '在不在', '哈喽', '嗨', '早上好', '中午好', '下午好', '晚上好', '在的', '哈哈', '哈哈哈', '谢谢', '感谢', '好的', 'ok', '嗯', '哦'];
+  if (greetings.includes(m.toLowerCase())) return false;
+  // 信息类关键词直接触发
+  const keywords = ['天气', '新闻', '今天', '最新', '现在', '目前', '最近', '当前', '实时', '比分', '股价', '汇率', '油价', '热搜', '发生了什么', '什么时候', '多少钱', '价格', '排名', '排行榜', '查一下', '搜索', '是什么', '为什么', '如何', '怎么', '多少', '介绍', '区别', '对比', '推荐'];
+  const lower = m.toLowerCase();
+  if (keywords.some(kw => lower.includes(kw))) return true;
+  // 问句（含问号或以"吗/呢"结尾）通常需要最新信息，触发搜索
+  if (/[？?]/.test(m) || /(吗|呢)\s*[？?]?$/.test(m)) return true;
+  // 已开启搜索且消息较长（像在探讨某个话题）时也尝试联网，确保"联网功能可用"
+  return m.length >= 12;
 }
 
 // HTML 实体解码（用于清洗抓取到的文本）
