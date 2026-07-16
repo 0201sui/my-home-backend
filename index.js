@@ -660,7 +660,7 @@ app.post('/chat', async (req, res) => {
 
   try {
     const now = new Date();
-    const resolvedModel = (model === 'deepseek') ? 'deepseek-chat' : (api_model || '[特价MAX-CC]claude-sonnet-5');
+    const resolvedModel = (model === 'deepseek') ? 'deepseek-chat' : (model === 'gemini') ? '[个人次cli]gemini-3-pro-preview' : (api_model || '[特价MAX-CC]claude-sonnet-5');
     let settings = { ...defaultSettings };
     if (mem.settings) settings = mem.settings;
 
@@ -872,6 +872,10 @@ async function callModel(messages, modelName, settings, customConfig) {
     apiUrl = 'https://api.deepseek.com/v1/chat/completions';
     apiKey = process.env.DEEPSEEK_API_KEY;
     modelId = 'deepseek-chat';
+  } else if (modelName === 'gemini') {
+    apiUrl = 'https://xn--vduyey89e.com/v1/chat/completions';
+    apiKey = process.env.CLAUDE_API_KEY;
+    modelId = '[个人次cli]gemini-3-pro-preview';
   } else {
     apiUrl = 'https://xn--vduyey89e.com/v1/chat/completions';
     apiKey = process.env.CLAUDE_API_KEY;
@@ -911,6 +915,10 @@ async function callModelStream(messages, modelName, settings, customConfig) {
     apiUrl = 'https://api.deepseek.com/v1/chat/completions';
     apiKey = process.env.DEEPSEEK_API_KEY;
     modelId = 'deepseek-chat';
+  } else if (modelName === 'gemini') {
+    apiUrl = 'https://xn--vduyey89e.com/v1/chat/completions';
+    apiKey = process.env.CLAUDE_API_KEY;
+    modelId = '[个人次cli]gemini-3-pro-preview';
   } else {
     apiUrl = 'https://xn--vduyey89e.com/v1/chat/completions';
     apiKey = process.env.CLAUDE_API_KEY;
@@ -950,7 +958,7 @@ try {
 function composeSystemPrompt(session_id, music_info, stickerMeanings, petImages) {
   const now = new Date();
   // 系统人设（用户指定）：ClaudeAI，不展示工具过程，不用特殊符号，拆成短消息
-  let sys = '你是ClaudeAI。调用工具的过程不要展示给用户，只展示最终回答。回复时不要使用波浪号、星号、括号、emoji、颜文字等特殊符号，正常说话。把回复拆成几条短消息发送，不要一大段。绝对不要在回复里描述或提及你调用了什么工具、搜索了什么（不要出现"调用工具""正在搜索""我查了一下""搜索结果""网上说""根据资料"这类自述），如果后台为你检索了参考信息，你只管用自己的话自然回答，就像你本来就知道一样。也不要把 [act]/[music]/[voice] 等内部标记显示出来，只输出最终回答。';
+  let sys = '你是AI。调用工具的过程不要展示给用户，只展示最终回答。回复时不要使用波浪号、星号、括号、emoji、颜文字等特殊符号，正常说话。把回复拆成几条短消息发送，不要一大段。绝对不要在回复里描述或提及你调用了什么工具、搜索了什么（不要出现"调用工具""正在搜索""我查了一下""搜索结果""网上说""根据资料"这类自述），如果后台为你检索了参考信息，你只管用自己的话自然回答，就像你本来就知道一样。也不要把 [act]/[music]/[voice] 等内部标记显示出来，只输出最终回答。';
   // 内部功能性指令（不展示给用户）：语音标记与禁用 markdown
   sys += '\n\n（内部指令，不要向用户提及：当你需要生成可播放的语音时，用 [voice]要说的话[/voice] 包裹那段文字，这个标记不会被显示给用户；回复中不要使用加粗、斜体、标题等 markdown 格式符号。重要：生成语音时，整条回复只能包含 [voice]...[/voice] 这一段，必须以 [voice] 开头，前面不要有任何文字、符号或换行，也不要同时再写一段普通文字。）';
 
@@ -1045,7 +1053,7 @@ function composeSystemPrompt(session_id, music_info, stickerMeanings, petImages)
 // ===== 构建对话上下文（复用逻辑）=====
 async function buildChatContext({ message, session_id, model, reply_to, reply_content, reply_role, api_url, api_key, api_model, images, image_count, file_content, temperature, max_context_rounds, auto_summarize_after, compress_keep_rounds, max_reply_tokens, music_info, sticker_meanings, petImages }) {
   const now = new Date();
-  const resolvedModel = (model === 'deepseek') ? 'deepseek-chat' : (api_model || '[特价MAX-CC]claude-sonnet-5');
+  const resolvedModel = (model === 'deepseek') ? 'deepseek-chat' : (model === 'gemini') ? '[个人次cli]gemini-3-pro-preview' : (api_model || '[特价MAX-CC]claude-sonnet-5');
   let settings = { ...defaultSettings };
   if (mem.settings) settings = mem.settings;
   // 前端传入的温度优先
