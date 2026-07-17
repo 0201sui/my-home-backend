@@ -25,7 +25,7 @@ const mem = {
   readings: {},
   settings: null,
   stickers: [],
-  profile: { userBio: '', aiBio: '', userName: '我', aiName: 'ClaudeAI', nickname: '', petImage: '', petImages: [] },
+  profile: { userBio: '', aiBio: '', userName: '我', aiName: 'AI', nickname: '', petImage: '', petImages: [] },
   _id: 1
 };
 function nextId() { const id = String(mem._id++); scheduleSave(); return id; }
@@ -65,9 +65,9 @@ function loadState() {
       mem.stickers = raw.stickers || [];
       mem.profile = raw.profile || mem.profile;
       mem._id = raw._id || 1;
-      // 一次性迁移：旧默认昵称「裴拟」统一改为用户指定的「ClaudeAI」
+      // 一次性迁移：旧默认昵称「裴拟」统一改为用户指定的「AI」
       if (mem.profile && (mem.profile.aiName === '裴拟' || !mem.profile.aiName)) {
-        mem.profile.aiName = 'ClaudeAI';
+        mem.profile.aiName = 'AI';
         scheduleSave();
       }
       console.log('已从本地文件恢复状态：', mem.messages.length, '条消息 /', mem.memories.length, '条记忆');
@@ -957,7 +957,7 @@ try {
 
 function composeSystemPrompt(session_id, music_info, stickerMeanings, petImages) {
   const now = new Date();
-  // 系统人设（用户指定）：ClaudeAI，不展示工具过程，不用特殊符号，拆成短消息
+  // 系统人设（用户指定）：AI，不展示工具过程，不用特殊符号，拆成短消息
   let sys = '你是AI。调用工具的过程不要展示给用户，只展示最终回答。回复时不要使用波浪号、星号、括号、emoji、颜文字等特殊符号，正常说话。把回复拆成几条短消息发送，不要一大段。绝对不要在回复里描述或提及你调用了什么工具、搜索了什么（不要出现"调用工具""正在搜索""我查了一下""搜索结果""网上说""根据资料"这类自述），如果后台为你检索了参考信息，你只管用自己的话自然回答，就像你本来就知道一样。也不要把 [act]/[music]/[voice] 等内部标记显示出来，只输出最终回答。';
   // 内部功能性指令（不展示给用户）：语音标记与禁用 markdown
   sys += '\n\n（内部指令，不要向用户提及：当你需要生成可播放的语音时，用 [voice]要说的话[/voice] 包裹那段文字，这个标记不会被显示给用户；回复中不要使用加粗、斜体、标题等 markdown 格式符号。重要：生成语音时，整条回复只能包含 [voice]...[/voice] 这一段，必须以 [voice] 开头，前面不要有任何文字、符号或换行，也不要同时再写一段普通文字。）';
@@ -980,7 +980,7 @@ function composeSystemPrompt(session_id, music_info, stickerMeanings, petImages)
     sys += `\n\n【AI简介】${mem.profile.aiName || '裴拟'}：${mem.profile.aiBio.trim().slice(0, 150)}`;
   }
   if (mem.profile.aiName && mem.profile.aiName.trim()) {
-    sys += `\n\n【你的名字】你现在的名字是「${mem.profile.aiName.trim()}」（也就是 ClaudeAI），请以此自称并让用户这样称呼你。`;
+    sys += `\n\n【你的名字】你现在的名字是「${mem.profile.aiName.trim()}」（也就是 AI），请以此自称并让用户这样称呼你。`;
   }
   // 桌宠图片库（让用户/AI 都能从中选择桌宠形象；优先用前端随请求传入的最新列表，避免后端状态易失导致 AI 看不到新上传）
   const petList = (Array.isArray(petImages) && petImages.length > 0) ? petImages
