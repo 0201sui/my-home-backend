@@ -693,7 +693,7 @@ app.post('/chat', async (req, res) => {
     const recentHistory = history.slice(-maxRounds);
 
     // 精简系统提示词（与 buildChatContext 一致，控制长度避免 AI 失忆）
-    let sysContent = composeSystemPrompt(session_id, req.body.music_info, req.body.sticker_meanings || [], req.body.pet_images);
+    let sysContent = composeSystemPrompt(session_id, req.body.music_info, req.body.sticker_meanings || [], req.body.pet_images, model);
 
     const contextMessages = [{ role: 'system', content: sysContent.trim() }, ...recentHistory];
 
@@ -955,10 +955,22 @@ try {
   FEATURES_MANIFEST = fs.readFileSync(path.join(__dirname, 'features.json'), 'utf-8');
 } catch (e) { FEATURES_MANIFEST = ''; }
 
-function composeSystemPrompt(session_id, music_info, stickerMeanings, petImages) {
+function composeSystemPrompt(session_id, music_info, stickerMeanings, petImages, modelName) {
   const now = new Date();
-  // 系统人设（用户指定）：AI，不展示工具过程，不用特殊符号，拆成短消息
-  let sys = '你是AI。调用工具的过程不要展示给用户，只展示最终回答。回复时不要使用波浪号、星号、括号、emoji、颜文字等特殊符号，正常说话。把回复拆成几条短消息发送，不要一大段。绝对不要在回复里描述或提及你调用了什么工具、搜索了什么（不要出现"调用工具""正在搜索""我查了一下""搜索结果""网上说""根据资料"这类自述），如果后台为你检索了参考信息，你只管用自己的话自然回答，就像你本来就知道一样。也不要把 [act]/[music]/[voice] 等内部标记显示出来，只输出最终回答。';
+  // 系统人设（用户指定）：不展示工具过程，不用特殊符号，拆成短消息
+  let sys = '你是用户的智能聊天助手。调用工具的过程不要展示给用户，只展示最终回答。回复时不要使用波浪号、星号、括号、emoji、颜文字等特殊符号，正常说话。把回复拆成几条短消息发送，不要一大段。绝对不要在回复里描述或提及你调用了什么工具、搜索了什么（不要出现"调用工具""正在搜索""我查了一下""搜索结果""网上说""根据资料"这类自述），如果后台为你检索了参考信息，你只管用自己的话自然回答，就像你本来就知道一样。也不要把 [act]/[music]/[voice] 等内部标记显示出来，只输出最终回答。';
+
+  // 模型身份：根据前端切换的模型，让 AI 真正知道自己运行在哪个模型上
+  const MODEL_IDENTITY = {
+    gemini: '你当前由 Google 开发的 Gemini 大模型驱动（具体版本 gemini-3-pro-preview）。',
+    claude: '你当前由 Anthropic 开发的 Claude 大模型驱动（具体版本 claude-sonnet）。',
+    deepseek: '你当前由 DeepSeek 开发的 DeepSeek 大模型驱动（具体版本 deepseek-chat）。',
+  };
+  if (modelName && MODEL_IDENTITY[modelName]) {
+    sys += `\n\n【你的模型身份】${MODEL_IDENTITY[modelName]}`;
+  } else if (modelName) {
+    sys += `\n\n【你的模型身份】你当前由用户自定义配置的模型（${modelName}）驱动。`;
+  }
   // 内部功能性指令（不展示给用户）：语音标记与禁用 markdown
   sys += '\n\n（内部指令，不要向用户提及：当你需要生成可播放的语音时，用 [voice]要说的话[/voice] 包裹那段文字，这个标记不会被显示给用户；回复中不要使用加粗、斜体、标题等 markdown 格式符号。重要：生成语音时，整条回复只能包含 [voice]...[/voice] 这一段，必须以 [voice] 开头，前面不要有任何文字、符号或换行，也不要同时再写一段普通文字。）';
 
@@ -980,7 +992,7 @@ function composeSystemPrompt(session_id, music_info, stickerMeanings, petImages)
     sys += `\n\n【AI简介】${mem.profile.aiName || '裴拟'}：${mem.profile.aiBio.trim().slice(0, 150)}`;
   }
   if (mem.profile.aiName && mem.profile.aiName.trim()) {
-    sys += `\n\n【你的名字】你现在的名字是「${mem.profile.aiName.trim()}」（也就是 AI），请以此自称并让用户这样称呼你。`;
+    sys += `\n\n【你的昵称】用户平时称呼你为「${mem.profile.aiName.trim()}」。对话中你可以自然地用这个昵称自称，但请记住，这只是用户给你起的昵称，你真正的底层模型由上文【你的模型身份】决定。`;
   }
   // 桌宠图片库（让用户/AI 都能从中选择桌宠形象；优先用前端随请求传入的最新列表，避免后端状态易失导致 AI 看不到新上传）
   const petList = (Array.isArray(petImages) && petImages.length > 0) ? petImages
@@ -1081,7 +1093,7 @@ async function buildChatContext({ message, session_id, model, reply_to, reply_co
   const maxRounds = 999999;
   const recentHistory = history.slice(-maxRounds);
 
-  let sysContent = composeSystemPrompt(session_id, music_info, sticker_meanings || [], petImages);
+  let sysContent = composeSystemPrompt(session_id, music_info, sticker_meanings || [], petImages, model);
 
   // 文件内容注入
   let fullMessage = message || '';
