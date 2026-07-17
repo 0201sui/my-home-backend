@@ -26,6 +26,7 @@ const mem = {
   settings: null,
   stickers: [],
   profile: { userBio: '', aiBio: '', userName: '我', aiName: 'AI', nickname: '', petImage: '', petImages: [] },
+  emotionScores: [],
   _id: 1
 };
 function nextId() { const id = String(mem._id++); scheduleSave(); return id; }
@@ -47,6 +48,7 @@ function scheduleSave() {
         settings: mem.settings,
         stickers: mem.stickers,
         profile: mem.profile,
+        emotionScores: mem.emotionScores,
         _id: mem._id
       }));
     } catch (e) { console.error('保存状态失败:', e.message); }
@@ -64,6 +66,7 @@ function loadState() {
       mem.settings = raw.settings || null;
       mem.stickers = raw.stickers || [];
       mem.profile = raw.profile || mem.profile;
+      mem.emotionScores = Array.isArray(raw.emotionScores) ? raw.emotionScores : [];
       mem._id = raw._id || 1;
       // 一次性迁移：旧默认昵称「裴拟」或「ClaudeAI」统一改为用户指定的「AI」
       if (mem.profile && (mem.profile.aiName === '裴拟' || mem.profile.aiName === 'ClaudeAI' || !mem.profile.aiName)) {
@@ -652,6 +655,32 @@ app.put('/settings', (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// ===== 情绪分析接口 =====
+// 获取最近 days 天的情绪分数（连续日期，缺那天填 null）
+app.get('/emotion/history', (req, res) => {
+  try {
+    const days = Math.min(60, Math.max(7, parseInt(req.query.days) || 7));
+    const points = [];
+    const today = new Date();
+    for (let i = days - 1; i >= 0; i--) {
+      const d = new Date(today);
+      d.setDate(today.getDate() - i);
+      const ds = todayStr(d);
+      const rec = mem.emotionScores.find(e => e.date === ds);
+      points.push({ date: ds, score: rec ? rec.score : null, summary: rec ? rec.summary : '' });
+    }
+    res.json({ days, points });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// 手动触发一次今日情绪分析（调试/补算用）
+app.post('/emotion/analyze', async (req, res) => {
+  try {
+    scheduleEmotionAnalysis(0);
+    res.json({ ok: true, message: '已触发今日情绪分析' });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 // ===== 核心对话 =====
 app.post('/chat', async (req, res) => {
   const { message, session_id, model, reply_to, stickers, api_url, api_key, api_model, images, tts_config } = req.body;
@@ -680,6 +709,7 @@ app.post('/chat', async (req, res) => {
     mem.messages.push(userMsg);
     const s = mem.sessions.find(s => s.id === session_id);
     if (s) s.updated_at = now.toISOString();
+    scheduleEmotionAnalysis();
 
     // 加载历史（文本 + 图片标记）
     const history = mem.messages.filter(m => m.session_id === session_id && m.visible).sort((a, b) => new Date(a.created_at) - new Date(b.created_at)).map(m => {
@@ -901,6 +931,82 @@ async function callModel(messages, modelName, settings, customConfig) {
   const content = data.choices?.[0]?.message?.content || '无回复';
   const usage = data.usage || null;
   return { content, usage };
+}
+
+// ===== 每日聊天情绪分析 =====
+let _emotionTimer = null;
+let _emotionRunning = false;
+
+function todayStr(d = new Date()) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+// 读取当天聊天记录 → 调大模型 → 1-10 情绪分数 → upsert 到 mem.emotionScores
+async function analyzeTodayEmotion() {
+  if (_emotionRunning) return;
+  _emotionRunning = true;
+  try {
+    if (!process.env.CLAUDE_API_KEY) return;
+    const dateStr = todayStr();
+    const todayMsgs = mem.messages.filter(m => {
+      if (!m.visible) return false;
+      const created = m.created_at ? new Date(m.created_at) : null;
+      return created && todayStr(created) === dateStr;
+    });
+    if (todayMsgs.length === 0) return;
+
+    // 取最近 60 条，拼接成节选（控制长度，避免超出上下文）
+    const recent = todayMsgs.slice(-60).map(m => {
+      const role = m.role === 'user' ? '用户' : 'AI';
+      let c = m.content || '';
+      if (m.images && m.images.length) c += ' [图片]';
+      if (m.voice) c += ' [语音]';
+      return `${role}：${c}`.slice(0, 400);
+    }).join('\n');
+
+    const prompt = `以下是用户今天（${dateStr}）与AI的聊天记录节选：\n\n${recent}\n\n请综合判断用户今天的整体情绪状态，给出一个 1-10 的情绪分数（1=非常糟糕/负面，10=非常愉快/正面），并附一句简短的中文总结。\n只返回一个严格的 JSON 对象，不要任何额外文字或解释，格式：{"score": 数字, "summary": "一句中文总结"}`;
+
+    const { content } = await callModel(
+      [{ role: 'system', content: '你是一个情绪分析助手，必须且只能输出一个 JSON 对象。' }, { role: 'user', content: prompt }],
+      'claude',
+      { max_reply_tokens: 300, temperature: 0.3 },
+      null
+    );
+
+    const match = content.match(/\{[\s\S]*\}/);
+    if (!match) return;
+    const parsed = JSON.parse(match[0]);
+    let score = Math.max(1, Math.min(10, Math.round(Number(parsed.score) || 0)));
+    if (!score) return;
+    const summary = String(parsed.summary || '').slice(0, 120);
+
+    const existing = mem.emotionScores.find(e => e.date === dateStr);
+    if (existing) {
+      existing.score = score;
+      existing.summary = summary;
+      existing.updatedAt = new Date().toISOString();
+    } else {
+      mem.emotionScores.push({ date: dateStr, score, summary, updatedAt: new Date().toISOString() });
+    }
+    scheduleSave();
+    console.log('[情绪分析] 完成', dateStr, 'score=', score);
+  } catch (e) {
+    console.error('[情绪分析] 失败:', e.message);
+  } finally {
+    _emotionRunning = false;
+  }
+}
+
+// 防抖触发：多次发消息只会在安静 20s 后分析一次，避免每次消息都调模型
+function scheduleEmotionAnalysis(delayMs = 20000) {
+  if (_emotionTimer) clearTimeout(_emotionTimer);
+  _emotionTimer = setTimeout(() => {
+    _emotionTimer = null;
+    analyzeTodayEmotion();
+  }, delayMs);
 }
 
 // ===== 流式模型调用 =====
@@ -1246,6 +1352,7 @@ app.post('/chat/stream', async (req, res) => {
     mem.messages.push(userMsg);
     const s = mem.sessions.find(s => s.id === session_id);
     if (s) s.updated_at = now.toISOString();
+    scheduleEmotionAnalysis();
 
     // 构建上下文
     const customConfig = (api_url && api_key) ? { api_url, api_key, api_model } : null;
@@ -1528,6 +1635,7 @@ app.post('/messages/send', async (req, res) => {
     mem.messages.push(userMsg);
     const s = mem.sessions.find(s => s.id === session_id);
     if (s) s.updated_at = now.toISOString();
+    scheduleEmotionAnalysis();
 
     res.json({ success: true, message: userMsg });
   } catch (err) { res.status(500).json({ error: err.message }); }
