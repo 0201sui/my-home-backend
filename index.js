@@ -65,8 +65,8 @@ function loadState() {
       mem.stickers = raw.stickers || [];
       mem.profile = raw.profile || mem.profile;
       mem._id = raw._id || 1;
-      // 一次性迁移：旧默认昵称「裴拟」统一改为用户指定的「AI」
-      if (mem.profile && (mem.profile.aiName === '裴拟' || !mem.profile.aiName)) {
+      // 一次性迁移：旧默认昵称「裴拟」或「ClaudeAI」统一改为用户指定的「AI」
+      if (mem.profile && (mem.profile.aiName === '裴拟' || mem.profile.aiName === 'ClaudeAI' || !mem.profile.aiName)) {
         mem.profile.aiName = 'AI';
         scheduleSave();
       }
